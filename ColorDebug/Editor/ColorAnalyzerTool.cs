@@ -17,6 +17,12 @@ public class ColorAnalyzerTool : EditorWindow
     private bool useLogScale = true;
     private float amplificationFactor = 2.0f;
 
+    // 채널 토글 옵션
+    private bool showRed = true;
+    private bool showGreen = true;
+    private bool showBlue = true;
+    private bool showLuminance = true;
+
     private ComputeShader histogramComputeShader;
     private ComputeBuffer histogramBuffer;
     private RenderTexture histogramTexture;
@@ -25,11 +31,12 @@ public class ColorAnalyzerTool : EditorWindow
 
     private const int HISTOGRAM_TEXTURE_HEIGHT = 200;
 
-    [MenuItem("Window/Color Analysis Tool (sRGB Final + Luminance)")]
+    [MenuItem("Window/Color Analysis Tool")]
     public static void ShowWindow()
     {
-        var window = GetWindow<ColorAnalyzerTool>("Color Analysis (sRGB + Luma)");
-        window.minSize = new Vector2(420, 500);
+        var window = GetWindow<ColorAnalyzerTool>("Color Analyzer");
+        window.minSize = new Vector2(380, 600);
+        window.maxSize = new Vector2(600, 1200);
     }
 
     void OnEnable()
@@ -95,83 +102,180 @@ public class ColorAnalyzerTool : EditorWindow
 
     void OnGUI()
     {
-        // Header and Controls
-        EditorGUILayout.LabelField("Color Analysis Tool", EditorStyles.boldLabel);
-        EditorGUILayout.Space();
+        EditorGUILayout.Space(5);
+
+        // === CAPTURE SECTION ===
         EditorGUILayout.BeginVertical("box");
-        captureTarget = (CaptureTarget)EditorGUILayout.EnumPopup("Capture Target:", captureTarget);
+        EditorGUILayout.LabelField("Capture Settings", EditorStyles.boldLabel);
+        EditorGUILayout.Space(3);
+
+        EditorGUILayout.BeginHorizontal();
+        EditorGUILayout.LabelField("Target:", GUILayout.Width(50));
+        captureTarget = (CaptureTarget)EditorGUILayout.EnumPopup(captureTarget);
+        EditorGUILayout.EndHorizontal();
+
+        EditorGUILayout.BeginHorizontal();
         autoUpdate = EditorGUILayout.Toggle("Auto Update", autoUpdate);
+       
+        EditorGUILayout.EndHorizontal();
 
-        // 히스토그램 설정 옵션 추가
-        EditorGUILayout.Space();
-        EditorGUILayout.LabelField("Histogram Settings", EditorStyles.miniBoldLabel);
-        useLogScale = EditorGUILayout.Toggle("Use Log Scale", useLogScale);
-        amplificationFactor = EditorGUILayout.Slider("Amplification", amplificationFactor, 0.5f, 10.0f);
+        EditorGUILayout.Space(5);
 
-        if (GUILayout.Button("Capture", GUILayout.Height(30))) Capture();
+        EditorGUILayout.BeginHorizontal();
+
+        if (GUILayout.Button("Capture",GUILayout.Height(20)))
+        {
+            Capture();
+        }
+
+        EditorGUILayout.EndHorizontal();
+
+        EditorGUILayout.EndVertical();
+
+        EditorGUILayout.Space(6);
+
+        // === HISTOGRAM SETTINGS ===
+        EditorGUILayout.BeginVertical("box");
+        //EditorGUILayout.LabelField("Histogram Settings", EditorStyles.boldLabel);
+        //EditorGUILayout.Space(3);
+
+        //EditorGUILayout.BeginHorizontal();
+        //useLogScale = EditorGUILayout.Toggle("Log Scale", useLogScale, GUILayout.Width(80));
+        //EditorGUILayout.LabelField("Amplify:", GUILayout.Width(50));
+        //amplificationFactor = EditorGUILayout.Slider(amplificationFactor, 0.5f, 10.0f);
+        //EditorGUILayout.EndHorizontal();
+
+        //EditorGUILayout.Space(8);
+
+        // === CHANNEL VISIBILITY ===
+        EditorGUILayout.LabelField("Channel Visibility", EditorStyles.miniBoldLabel);
+        EditorGUILayout.Space(3);
+
+        // Red Channel
+        EditorGUILayout.BeginHorizontal();
+        showRed = EditorGUILayout.Toggle(showRed, GUILayout.Width(20));
+        var redRect = GUILayoutUtility.GetRect(15, 15, GUILayout.Width(15));
+        EditorGUI.DrawRect(redRect, showRed ? Color.red : new Color(0.3f, 0.3f, 0.3f));
+        EditorGUILayout.LabelField("Red Channel", GUILayout.Width(80));
+        GUILayout.FlexibleSpace();
+        EditorGUILayout.EndHorizontal();
+
+        // Green Channel
+        EditorGUILayout.BeginHorizontal();
+        showGreen = EditorGUILayout.Toggle(showGreen, GUILayout.Width(20));
+        var greenRect = GUILayoutUtility.GetRect(15, 15, GUILayout.Width(15));
+        EditorGUI.DrawRect(greenRect, showGreen ? Color.green : new Color(0.3f, 0.3f, 0.3f));
+        EditorGUILayout.LabelField("Green Channel", GUILayout.Width(80));
+        GUILayout.FlexibleSpace();
+        EditorGUILayout.EndHorizontal();
+
+        // Blue Channel
+        EditorGUILayout.BeginHorizontal();
+        showBlue = EditorGUILayout.Toggle(showBlue, GUILayout.Width(20));
+        var blueRect = GUILayoutUtility.GetRect(15, 15, GUILayout.Width(15));
+        EditorGUI.DrawRect(blueRect, showBlue ? Color.blue : new Color(0.3f, 0.3f, 0.3f));
+        EditorGUILayout.LabelField("Blue Channel", GUILayout.Width(80));
+        GUILayout.FlexibleSpace();
+        EditorGUILayout.EndHorizontal();
+
+        // Luminance Channel
+        EditorGUILayout.BeginHorizontal();
+        showLuminance = EditorGUILayout.Toggle(showLuminance, GUILayout.Width(20));
+        var lumaRect = GUILayoutUtility.GetRect(15, 15, GUILayout.Width(15));
+        EditorGUI.DrawRect(lumaRect, showLuminance ? Color.white : new Color(0.3f, 0.3f, 0.3f));
+        EditorGUILayout.LabelField("Luminance", GUILayout.Width(80));
+        GUILayout.FlexibleSpace();
+        EditorGUILayout.EndHorizontal();
+
+        // Quick toggle buttons
+        EditorGUILayout.Space(5);
+        EditorGUILayout.BeginHorizontal();
+        if (GUILayout.Button("All", GUILayout.Height(20)))
+        {
+            showRed = showGreen = showBlue = showLuminance = true;
+        }
+        if (GUILayout.Button("RGB", GUILayout.Height(20)))
+        {
+            showRed = showGreen = showBlue = true;
+            showLuminance = false;
+        }
+        if (GUILayout.Button("Luma", GUILayout.Height(20)))
+        {
+            showRed = showGreen = showBlue = false;
+            showLuminance = true;
+        }
+        if (GUILayout.Button("None", GUILayout.Height(20)))
+        {
+            showRed = showGreen = showBlue = showLuminance = false;
+        }
+        EditorGUILayout.EndHorizontal();
+
         EditorGUILayout.EndVertical();
 
         if (!resourcesLoaded)
         {
-            EditorGUILayout.HelpBox("Failed to load resources! Check console for errors.", MessageType.Error);
+            EditorGUILayout.Space(10);
+            EditorGUILayout.HelpBox("Failed to load histogram resources!\nCheck console for shader loading errors.", MessageType.Error);
+            if (GUILayout.Button("Retry Loading"))
+            {
+                LoadResources();
+            }
             return;
         }
 
         if (capturedTexture == null)
         {
-            EditorGUILayout.HelpBox("Press 'Capture' to begin.", MessageType.Info);
+            EditorGUILayout.Space(10);
+            EditorGUILayout.HelpBox("No image captured yet.\nPress 'Capture Now' to begin analysis.", MessageType.Info);
             return;
         }
 
-        EditorGUILayout.Space();
+        EditorGUILayout.Space(8);
 
-        // 1. Draw the preview texture
+        // === PREVIEW IMAGE ===
+        EditorGUILayout.LabelField("Captured Image", EditorStyles.boldLabel);
+        EditorGUILayout.Space(3);
+
         float aspectRatio = (float)capturedTexture.width / capturedTexture.height;
-        Rect previewRect = GUILayoutUtility.GetAspectRect(aspectRatio, GUILayout.ExpandWidth(true));
+        float windowWidth = EditorGUIUtility.currentViewWidth - 30;
+        float previewHeight = Mathf.Min(windowWidth / aspectRatio, 200f);
+
+        Rect previewRect = GUILayoutUtility.GetRect(windowWidth, previewHeight);
+        EditorGUI.DrawRect(previewRect, new Color(0.2f, 0.2f, 0.2f));
         GUI.DrawTexture(previewRect, capturedTexture, ScaleMode.ScaleToFit);
 
-        EditorGUILayout.Space(10);
-
-        // 2. Draw histogram using GUILayout for proper sizing
-        EditorGUILayout.LabelField("Histogram (RGB + Luminance Channels)", EditorStyles.boldLabel);
-
-        // 범례 표시
+        // Image info
         EditorGUILayout.BeginHorizontal();
-        GUILayout.Label("Red", GUILayout.Width(30));
-        var redRect = GUILayoutUtility.GetRect(20, 10);
-        EditorGUI.DrawRect(redRect, Color.red);
-
-        GUILayout.Label("Green", GUILayout.Width(40));
-        var greenRect = GUILayoutUtility.GetRect(20, 10);
-        EditorGUI.DrawRect(greenRect, Color.green);
-
-        GUILayout.Label("Blue", GUILayout.Width(30));
-        var blueRect = GUILayoutUtility.GetRect(20, 10);
-        EditorGUI.DrawRect(blueRect, Color.blue);
-
-        GUILayout.Label("Luminance", GUILayout.Width(60));
-        var lumaRect = GUILayoutUtility.GetRect(20, 10);
-        EditorGUI.DrawRect(lumaRect, Color.white);
-
+        EditorGUILayout.LabelField($"Size: {capturedTexture.width} × {capturedTexture.height}", EditorStyles.miniLabel);
         GUILayout.FlexibleSpace();
+        EditorGUI.BeginDisabledGroup(true);
+        GUILayout.Toggle(autoUpdate, "Auto", EditorStyles.miniButton, GUILayout.Width(50));
+        EditorGUI.EndDisabledGroup();
         EditorGUILayout.EndHorizontal();
 
-        // 캡처된 이미지 크기에 맞춰 히스토그램 높이 계산
-        float windowWidth = EditorGUIUtility.currentViewWidth - 20; // Account for padding
-        float capturedImageAspect = (float)capturedTexture.width / capturedTexture.height;
-        float displayedImageWidth = windowWidth;
-        float displayedImageHeight = displayedImageWidth / capturedImageAspect;
+        EditorGUILayout.Space(15);
 
-        // 히스토그램 높이를 표시된 이미지 높이의 30-50% 정도로 설정
-        float histogramHeight = Mathf.Clamp(displayedImageHeight, 100f, 300f);
+        // === HISTOGRAM ===
+        EditorGUILayout.LabelField("Color Histogram", EditorStyles.boldLabel);
+        EditorGUILayout.Space(3);
 
-        Rect histogramLayoutRect = GUILayoutUtility.GetRect(windowWidth, histogramHeight, GUILayout.ExpandWidth(true));
+        float histogramHeight = Mathf.Clamp(windowWidth * 1.0f, 120f, 250f);
+        Rect histogramRect = GUILayoutUtility.GetRect(windowWidth, histogramHeight);
+
+        EditorGUI.DrawRect(histogramRect, new Color(0.15f, 0.15f, 0.15f));
 
         if (Event.current.type == EventType.Repaint && histogramTexture != null)
         {
-            // Draw with proper texture coordinates (no flipping needed)
-            GUI.DrawTexture(histogramLayoutRect, histogramTexture, ScaleMode.StretchToFill);
+            GUI.DrawTexture(histogramRect, histogramTexture, ScaleMode.StretchToFill);
         }
+
+        // Histogram info
+        EditorGUILayout.BeginHorizontal();
+        int activeChannels = (showRed ? 1 : 0) + (showGreen ? 1 : 0) + (showBlue ? 1 : 0) + (showLuminance ? 1 : 0);
+        EditorGUILayout.LabelField($"Active Channels: {activeChannels}/4", EditorStyles.miniLabel);
+        GUILayout.FlexibleSpace();
+        EditorGUILayout.LabelField($"Scale: {(useLogScale ? "Log" : "Linear")}, Amp: {amplificationFactor:F1}x", EditorStyles.miniLabel);
+        EditorGUILayout.EndHorizontal();
     }
 
     void Capture()
@@ -250,6 +354,12 @@ public class ColorAnalyzerTool : EditorWindow
         histogramMaterial.SetVector("_Params", new Vector2(256, HISTOGRAM_TEXTURE_HEIGHT));
         histogramMaterial.SetFloat("_UseLogScale", useLogScale ? 1.0f : 0.0f);
         histogramMaterial.SetFloat("_AmplificationFactor", amplificationFactor);
+
+        // 채널 토글 상태를 셰이더에 전달
+        histogramMaterial.SetFloat("_ShowRed", showRed ? 1.0f : 0.0f);
+        histogramMaterial.SetFloat("_ShowGreen", showGreen ? 1.0f : 0.0f);
+        histogramMaterial.SetFloat("_ShowBlue", showBlue ? 1.0f : 0.0f);
+        histogramMaterial.SetFloat("_ShowLuminance", showLuminance ? 1.0f : 0.0f);
 
         // 명시적으로 full-screen quad 그리기
         GL.PushMatrix();

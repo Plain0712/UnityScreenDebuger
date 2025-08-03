@@ -32,6 +32,10 @@ Shader "Hidden/PostProcessing/Debug/Histogram"
                 float2 _Params; // x: width, y: height
                 float _UseLogScale;
                 float _AmplificationFactor;
+                float _ShowRed;
+                float _ShowGreen;
+                float _ShowBlue;
+                float _ShowLuminance;
 
                 float FindMaxHistogramValue()
                 {
@@ -106,11 +110,11 @@ Shader "Hidden/PostProcessing/Debug/Histogram"
 
                     float currentY = 1.0 - i.texcoord.y;
 
-                    // 각 채널의 강도를 직접 표시
-                    float r = step(currentY, normalizedValue_r);
-                    float g = step(currentY, normalizedValue_g);
-                    float b = step(currentY, normalizedValue_b);
-                    float l = step(currentY, normalizedValue_l);
+                    // 각 채널의 강도를 직접 표시 (토글 상태 적용)
+                    float r = step(currentY, normalizedValue_r) * _ShowRed;
+                    float g = step(currentY, normalizedValue_g) * _ShowGreen;
+                    float b = step(currentY, normalizedValue_b) * _ShowBlue;
+                    float l = step(currentY, normalizedValue_l) * _ShowLuminance;
 
                     // RGB 채널 표시 + 휘도를 흰색으로 오버레이
                     float3 color = float3(r, g, b);
