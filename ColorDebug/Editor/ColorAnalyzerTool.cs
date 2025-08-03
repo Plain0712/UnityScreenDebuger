@@ -10,12 +10,12 @@ public class ColorAnalyzerTool : EditorWindow
     private CaptureTarget captureTarget = CaptureTarget.GameView;
     private Texture2D capturedTexture;
     private bool autoUpdate = false;
-    private float updateInterval = 0.1f; // 더 빠른 업데이트 (10fps)
+    private float updateInterval = 0.01f; // 업데이트 변수
     private double lastUpdateTime;
 
-    // 히스토그램 표시 옵션 (UI에 표시하지 않음)
+    // 히스토그램 표시 옵션
     private bool useLogScale = true;
-    private float amplificationFactor = 3.0f;
+    private float amplificationFactor = 2.0f;
 
     private ComputeShader histogramComputeShader;
     private ComputeBuffer histogramBuffer;
@@ -25,10 +25,10 @@ public class ColorAnalyzerTool : EditorWindow
 
     private const int HISTOGRAM_TEXTURE_HEIGHT = 200;
 
-    [MenuItem("Window/Color Analysis Tool (sRGB Final)")]
+    [MenuItem("Window/Color Analysis Tool (sRGB Final + Luminance)")]
     public static void ShowWindow()
     {
-        var window = GetWindow<ColorAnalyzerTool>("Color Analysis (sRGB)");
+        var window = GetWindow<ColorAnalyzerTool>("Color Analysis (sRGB + Luma)");
         window.minSize = new Vector2(420, 500);
     }
 
@@ -48,7 +48,8 @@ public class ColorAnalyzerTool : EditorWindow
 
         if (histogramComputeShader != null && shader != null)
         {
-            histogramBuffer = new ComputeBuffer(256, sizeof(uint));
+            // RGB + Luminance 4채널을 위해 256 * 4 크기로 생성
+            histogramBuffer = new ComputeBuffer(256 * 4, sizeof(uint));
 
             histogramTexture = new RenderTexture(256, HISTOGRAM_TEXTURE_HEIGHT, 0, RenderTextureFormat.ARGB32);
             histogramTexture.enableRandomWrite = true;
@@ -95,11 +96,18 @@ public class ColorAnalyzerTool : EditorWindow
     void OnGUI()
     {
         // Header and Controls
-        EditorGUILayout.LabelField("Color Analysis Tool (sRGB Only)", EditorStyles.boldLabel);
+        EditorGUILayout.LabelField("Color Analysis Tool", EditorStyles.boldLabel);
         EditorGUILayout.Space();
         EditorGUILayout.BeginVertical("box");
         captureTarget = (CaptureTarget)EditorGUILayout.EnumPopup("Capture Target:", captureTarget);
         autoUpdate = EditorGUILayout.Toggle("Auto Update", autoUpdate);
+
+        // 히스토그램 설정 옵션 추가
+        EditorGUILayout.Space();
+        EditorGUILayout.LabelField("Histogram Settings", EditorStyles.miniBoldLabel);
+        useLogScale = EditorGUILayout.Toggle("Use Log Scale", useLogScale);
+        amplificationFactor = EditorGUILayout.Slider("Amplification", amplificationFactor, 0.5f, 10.0f);
+
         if (GUILayout.Button("Capture", GUILayout.Height(30))) Capture();
         EditorGUILayout.EndVertical();
 
@@ -125,7 +133,28 @@ public class ColorAnalyzerTool : EditorWindow
         EditorGUILayout.Space(10);
 
         // 2. Draw histogram using GUILayout for proper sizing
-        EditorGUILayout.LabelField("Histogram (Value Channel)", EditorStyles.boldLabel);
+        EditorGUILayout.LabelField("Histogram (RGB + Luminance Channels)", EditorStyles.boldLabel);
+
+        // 범례 표시
+        EditorGUILayout.BeginHorizontal();
+        GUILayout.Label("Red", GUILayout.Width(30));
+        var redRect = GUILayoutUtility.GetRect(20, 10);
+        EditorGUI.DrawRect(redRect, Color.red);
+
+        GUILayout.Label("Green", GUILayout.Width(40));
+        var greenRect = GUILayoutUtility.GetRect(20, 10);
+        EditorGUI.DrawRect(greenRect, Color.green);
+
+        GUILayout.Label("Blue", GUILayout.Width(30));
+        var blueRect = GUILayoutUtility.GetRect(20, 10);
+        EditorGUI.DrawRect(blueRect, Color.blue);
+
+        GUILayout.Label("Luminance", GUILayout.Width(60));
+        var lumaRect = GUILayoutUtility.GetRect(20, 10);
+        EditorGUI.DrawRect(lumaRect, Color.white);
+
+        GUILayout.FlexibleSpace();
+        EditorGUILayout.EndHorizontal();
 
         // 캡처된 이미지 크기에 맞춰 히스토그램 높이 계산
         float windowWidth = EditorGUIUtility.currentViewWidth - 20; // Account for padding
@@ -200,7 +229,8 @@ public class ColorAnalyzerTool : EditorWindow
         int kernelGather = histogramComputeShader.FindKernel("KHistogramGather");
 
         histogramComputeShader.SetBuffer(kernelClear, "_HistogramBuffer", histogramBuffer);
-        histogramComputeShader.Dispatch(kernelClear, 256 / 16, 1, 1);
+        // RGB + Luminance 4채널(1024개) 클리어를 위해 스레드 그룹 수 증가
+        histogramComputeShader.Dispatch(kernelClear, Mathf.CeilToInt((256 * 4) / 16f), 1, 1);
 
         histogramComputeShader.SetTexture(kernelGather, "_Source", source);
         histogramComputeShader.SetBuffer(kernelGather, "_HistogramBuffer", histogramBuffer);
