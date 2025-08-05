@@ -1,6 +1,6 @@
 ﻿Shader "Hidden/Waveform"
 {
-    Properties { }
+    Properties {}
     SubShader
     {
         Tags { "Queue"="Overlay" "RenderType"="Opaque" }
@@ -13,41 +13,44 @@
             #pragma fragment frag
             #include "UnityCG.cginc"
 
-            // ──────────────────────────────────────────────
-            // buffers & uniforms – ColorAnalyzerTool.cs와 동일한 이름
-            StructuredBuffer<uint4> _WaveformBuffer;     // width × height 개 - RGBA 카운트
-            float4 _Params;                              // (srcW, srcH, texH, _)
-            // ──────────────────────────────────────────────
+            StructuredBuffer<uint4> _WaveformBuffer;
+            // x: srcWidth, y: srcHeight, z: exposure
+            float3 _Params;
 
-            struct v2f
-            {
-                float4 pos : SV_POSITION;
-                float2 uv  : TEXCOORD0;
-            };
+            struct v2f { float4 pos:SV_POSITION; float2 uv:TEXCOORD0; };
 
-            v2f vert (appdata_img v)
+            v2f vert(appdata_img v)
             {
                 v2f o;
                 o.pos = UnityObjectToClipPos(v.vertex);
-                o.uv  = v.texcoord.xy;
+                o.uv  = v.texcoord;
                 return o;
             }
 
-            float4 frag (v2f i) : SV_Target
+            float3 Tonemap(float3 x, float exposure)
             {
-                int srcW = (int)_Params.x;
-                int srcH = (int)_Params.y;
+                const float a = 6.2, b = 0.5, c = 1.7, d = 0.06;
+                x = max(x * exposure - 0.004, 0);
+                x = (x * (a * x + b)) / (x * (a * x + c) + d);
+                return x * x;
+            }
 
-                int xi = clamp((int)(i.uv.x * srcW), 0, srcW - 1);
-                int yi = clamp((int)(i.uv.y * srcH), 0, srcH - 1);
-                uint4 sample = _WaveformBuffer[yi * srcW + xi];
+            float4 frag(v2f i) : SV_Target
+            {
+                int w = (int)_Params.x, h = (int)_Params.y;
+                int xi = clamp((int)(i.uv.x * w), 0, w - 1);
+                int yi = clamp((int)(i.uv.y * h), 0, h - 1);
 
-                // 간단한 스케일링 – 필요하면 조정
-                float3 rgb = float3(sample.x, sample.y, sample.z) * 0.0005;
-                rgb = saturate(rgb);
+                // ─── 핵심 수정: x * height + y ───
+                uint4 s = _WaveformBuffer[xi * h + yi];
 
-                float  a = max(rgb.r, max(rgb.g, rgb.b));  // 알파 = 최고 밝기
-                return float4(rgb, a);
+                float3 col =
+                      float3(1.4, 0.03, 0.02) * s.r +
+                      float3(0.02, 1.1, 0.05) * s.g +
+                      float3(0.00, 0.25, 1.5) * s.b;
+
+                col = Tonemap(col, _Params.z);
+                return float4(saturate(col), 1);
             }
             ENDHLSL
         }

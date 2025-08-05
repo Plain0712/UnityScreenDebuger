@@ -1,4 +1,4 @@
-// Unified Image Analysis Compute Shader
+﻿// Unified Image Analysis Compute Shader
 // Contains Histogram, Vectorscope, and Waveform analysis
 
 #pragma kernel KHistogramClear
@@ -124,28 +124,19 @@ void KWaveformClear(uint2 dispatchThreadId : SV_DispatchThreadID)
 }
 
 [numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
-void KWaveformGather(uint2 dispatchThreadId : SV_DispatchThreadID)
+void KWaveformGather(uint2 id : SV_DispatchThreadID)
 {
-    if (dispatchThreadId.x >= (uint) _Params.x || dispatchThreadId.y >= (uint) _Params.y)
+    // Params.x = srcWidth, Params.y = srcHeight
+    if (id.x >= (uint) _Params.x || id.y >= (uint) _Params.y)
         return;
 
-    float3 color = saturate(_Source[dispatchThreadId].rgb);
+    float3 color = saturate(_Source[id].rgb); // sRGB 그대로 사용
 
-    // Apply gamma correction if needed (like Photoshop)
-    if (_Params.z > 0)
-        color = LinearToSRGB(color);
+    uint bins = (uint) _Params.y; // 세로축 해상도 = 히스토그램 bins
+    uint3 idx = (uint3) (color * (bins - 1));
 
-    // Convert channel values to histogram bin indices
-    uint3 idx = (uint3) (color * ((uint) _Params.y - 1));
-    
-    // Calculate buffer indices for each channel
-    uint baseIdx = dispatchThreadId.x * (uint) _Params.y;
-    uint idx_r = baseIdx + idx.x;
-    uint idx_g = baseIdx + idx.y;
-    uint idx_b = baseIdx + idx.z;
-
-    // Increment counters for each color channel
-    InterlockedAdd(_WaveformBuffer[idx_r].x, 1u); // Red
-    InterlockedAdd(_WaveformBuffer[idx_g].y, 1u); // Green
-    InterlockedAdd(_WaveformBuffer[idx_b].z, 1u); // Blue
+    uint base = id.x * bins; // x*height + y  (픽셀셰이더와 동일)
+    InterlockedAdd(_WaveformBuffer[base + idx.x].x, 1u); // R
+    InterlockedAdd(_WaveformBuffer[base + idx.y].y, 1u); // G
+    InterlockedAdd(_WaveformBuffer[base + idx.z].z, 1u); // B
 }
