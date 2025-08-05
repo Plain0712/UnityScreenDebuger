@@ -1,0 +1,151 @@
+// Unified Image Analysis Compute Shader
+// Contains Histogram, Vectorscope, and Waveform analysis
+
+#pragma kernel KHistogramClear
+#pragma kernel KHistogramGather
+#pragma kernel KVectorscopeClear
+#pragma kernel KVectorscopeGather
+#pragma kernel KWaveformClear
+#pragma kernel KWaveformGather
+
+#define HISTOGRAM_BINS 256
+#define GROUP_SIZE_X 16
+#define GROUP_SIZE_Y 16
+
+// === SHARED RESOURCES ===
+Texture2D<float4> _Source;
+float4 _Params; // Usage varies by kernel - see individual sections
+
+// === SHARED UTILITY FUNCTIONS ===
+// Linear to sRGB conversion
+float3 LinearToSRGB(float3 color)
+{
+    float3 result;
+    result.x = color.x <= 0.0031308 ? 12.92 * color.x : 1.055 * pow(color.x, 1.0 / 2.4) - 0.055;
+    result.y = color.y <= 0.0031308 ? 12.92 * color.y : 1.055 * pow(color.y, 1.0 / 2.4) - 0.055;
+    result.z = color.z <= 0.0031308 ? 12.92 * color.z : 1.055 * pow(color.z, 1.0 / 2.4) - 0.055;
+    return result;
+}
+
+// RGB to YCbCr conversion (ITU-R BT.601)
+float3 RgbToYCbCr(float3 rgb)
+{
+    float3 yuv;
+    yuv.x = dot(rgb, float3(0.299, 0.587, 0.114)); // Y (luminance)
+    yuv.y = (rgb.b - yuv.x) * 0.564 + 0.5; // Cb (blue-difference)
+    yuv.z = (rgb.r - yuv.x) * 0.713 + 0.5; // Cr (red-difference)
+    return yuv;
+}
+
+// ========================================
+// HISTOGRAM ANALYSIS
+// ========================================
+// _Params: x = source width, y = source height, z/w = unused
+RWStructuredBuffer<uint> _HistogramBuffer;
+
+[numthreads(GROUP_SIZE_X, 1, 1)]
+void KHistogramClear(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    // RGB + Luminance = 4 channels
+    if (dispatchThreadId.x < HISTOGRAM_BINS * 4)
+        _HistogramBuffer[dispatchThreadId.x] = 0u;
+}
+
+[numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
+void KHistogramGather(uint2 dispatchThreadId : SV_DispatchThreadID)
+{
+    if (dispatchThreadId.x >= (uint) _Params.x || dispatchThreadId.y >= (uint) _Params.y)
+        return;
+
+    float3 color = _Source[dispatchThreadId].rgb;
+    
+    // Calculate luminance using standard weights
+    float luminance = dot(color, float3(0.299, 0.587, 0.114));
+    
+    uint idx_r = (uint) (saturate(color.r) * 255.0);
+    uint idx_g = (uint) (saturate(color.g) * 255.0);
+    uint idx_b = (uint) (saturate(color.b) * 255.0);
+    uint idx_l = (uint) (saturate(luminance) * 255.0);
+
+    InterlockedAdd(_HistogramBuffer[idx_r], 1u);
+    InterlockedAdd(_HistogramBuffer[idx_g + HISTOGRAM_BINS], 1u);
+    InterlockedAdd(_HistogramBuffer[idx_b + HISTOGRAM_BINS * 2], 1u);
+    InterlockedAdd(_HistogramBuffer[idx_l + HISTOGRAM_BINS * 3], 1u);
+}
+
+// ========================================
+// VECTORSCOPE ANALYSIS  
+// ========================================
+// _Params: x = source width, y = source height, z = buffer size, w = linear?
+RWStructuredBuffer<uint> _VectorscopeBuffer;
+
+[numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
+void KVectorscopeClear(uint2 dispatchThreadId : SV_DispatchThreadID)
+{
+    uint bufferSize = (uint) _Params.z;
+    if (dispatchThreadId.x < bufferSize && dispatchThreadId.y < bufferSize)
+        _VectorscopeBuffer[dispatchThreadId.y * bufferSize + dispatchThreadId.x] = 0u;
+}
+
+[numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
+void KVectorscopeGather(uint2 dispatchThreadId : SV_DispatchThreadID)
+{
+    if (dispatchThreadId.x >= (uint) _Params.x || dispatchThreadId.y >= (uint) _Params.y)
+        return;
+
+    float3 color = saturate(_Source[dispatchThreadId].rgb);
+
+    // Apply gamma correction if needed
+    if (_Params.w > 0)
+        color = LinearToSRGB(color);
+
+    // Convert to YCbCr color space
+    float3 yuv = RgbToYCbCr(color);
+    
+    // Map Cb and Cr to buffer coordinates
+    uint u = (uint) (saturate(yuv.y) * (_Params.z - 1.0));
+    uint v = (uint) (saturate(yuv.z) * (_Params.z - 1.0));
+    
+    uint bufferSize = (uint) _Params.z;
+    InterlockedAdd(_VectorscopeBuffer[v * bufferSize + u], 1u);
+}
+
+// ========================================
+// WAVEFORM ANALYSIS
+// ========================================
+// _Params: x = source width, y = source height, z = linear?, w = unused
+RWStructuredBuffer<uint4> _WaveformBuffer;
+
+[numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
+void KWaveformClear(uint2 dispatchThreadId : SV_DispatchThreadID)
+{
+    if (dispatchThreadId.x < (uint) _Params.x && dispatchThreadId.y < (uint) _Params.y)
+        _WaveformBuffer[dispatchThreadId.y * (uint) _Params.x + dispatchThreadId.x] = uint4(0u, 0u, 0u, 0u);
+}
+
+[numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
+void KWaveformGather(uint2 dispatchThreadId : SV_DispatchThreadID)
+{
+    if (dispatchThreadId.x >= (uint) _Params.x || dispatchThreadId.y >= (uint) _Params.y)
+        return;
+
+    float3 color = saturate(_Source[dispatchThreadId].rgb);
+
+    // Apply gamma correction if needed (like Photoshop)
+    if (_Params.z > 0)
+        color = LinearToSRGB(color);
+
+    // Convert channel values to histogram bin indices
+    uint3 idx = (uint3) (color * ((uint) _Params.y - 1));
+    
+    // Calculate buffer indices for each channel
+    uint baseIdx = dispatchThreadId.x * (uint) _Params.y;
+    uint idx_r = baseIdx + idx.x;
+    uint idx_g = baseIdx + idx.y;
+    uint idx_b = baseIdx + idx.z;
+
+    // Increment counters for each color channel
+    InterlockedAdd(_WaveformBuffer[idx_r].x, 1u); // Red
+    InterlockedAdd(_WaveformBuffer[idx_g].y, 1u); // Green
+    InterlockedAdd(_WaveformBuffer[idx_b].z, 1u); // Blue
+}
