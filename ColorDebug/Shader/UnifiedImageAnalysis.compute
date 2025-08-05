@@ -7,6 +7,8 @@
 #pragma kernel KVectorscopeGather
 #pragma kernel KWaveformClear
 #pragma kernel KWaveformGather
+#pragma kernel KSaliencyMap
+
 
 #define HISTOGRAM_BINS 256
 #define GROUP_SIZE_X 16
@@ -14,6 +16,13 @@
 
 // === SHARED RESOURCES ===
 Texture2D<float4> _Source;
+SamplerState sampler_Source
+{
+    Filter = MIN_MAG_MIP_POINT; // 또는 LINEAR
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+
 float4 _Params; // Usage varies by kernel - see individual sections
 
 // === SHARED UTILITY FUNCTIONS ===
@@ -36,6 +45,8 @@ float3 RgbToYCbCr(float3 rgb)
     yuv.z = (rgb.r - yuv.x) * 0.713 + 0.5; // Cr (red-difference)
     return yuv;
 }
+
+
 
 // ========================================
 // HISTOGRAM ANALYSIS
@@ -140,3 +151,56 @@ void KWaveformGather(uint2 id : SV_DispatchThreadID)
     InterlockedAdd(_WaveformBuffer[base + idx.y].y, 1u); // G
     InterlockedAdd(_WaveformBuffer[base + idx.z].z, 1u); // B
 }
+
+// ──────────────────────────────────────────────
+// Saliency Map Kernel
+// output: RWTexture2D<float> _SaliencyMap
+// _Params.xy = (srcW, srcH)
+// _Params.z  = unused
+// ──────────────────────────────────────────────
+
+RWTexture2D<float> _SaliencyMap;
+
+[numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
+void KSaliencyMap(uint2 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint) _Params.x || id.y >= (uint) _Params.y)
+        return;
+
+    float2 uv = (id + 0.5) / _Params.xy;
+
+    float3 color = _Source.SampleLevel(sampler_Source, uv, 0).rgb;
+
+    // ─── 1. Luminance
+    float luminance = dot(color, float3(0.2126, 0.7152, 0.0722));
+    float lumContrast = abs(luminance - 0.5) * 2.0; // 중심에서 멀수록 강함
+
+    // ─── 2. Saturation
+    float maxRGB = max(color.r, max(color.g, color.b));
+    float minRGB = min(color.r, min(color.g, color.b));
+    float saturation = (maxRGB == 0) ? 0 : (maxRGB - minRGB) / maxRGB;
+
+    // ─── 3. Edge (gradient magnitude on luminance)
+    float lum_dx = 0, lum_dy = 0;
+    if (id.x < (uint) _Params.x - 1)
+    {
+        float3 colR = saturate(_Source[id + uint2(1, 0)].rgb);
+        float lumR = dot(colR, float3(0.2126, 0.7152, 0.0722));
+        lum_dx = lumR - luminance;
+    }
+    if (id.y < (uint) _Params.y - 1)
+    {
+        float3 colD = saturate(_Source[id + uint2(0, 1)].rgb);
+        float lumD = dot(colD, float3(0.2126, 0.7152, 0.0722));
+        lum_dy = lumD - luminance;
+    }
+
+    float edge = sqrt(lum_dx * lum_dx + lum_dy * lum_dy); // simple gradient
+
+    // ─── 최종 가중합
+    float saliency = lumContrast * 0.4 + saturation * 0.4 + edge * 0.2;
+
+    _SaliencyMap[id] = saliency;
+}
+
+

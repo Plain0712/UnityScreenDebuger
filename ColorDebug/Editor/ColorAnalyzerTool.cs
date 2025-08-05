@@ -6,7 +6,7 @@ public class ColorAnalyzerTool : EditorWindow
     private const string FOLDER_PATH = "Assets/Script/UnityScreenDebuger/ColorDebug/Shader";
 
     private enum CaptureTarget { GameView, SceneView }
-    private enum AnalysisMode { Histogram, Vectorscope, Waveform }
+    private enum AnalysisMode { Histogram, Vectorscope, Waveform, Saliency } // ← Saliency 추가
 
     private CaptureTarget captureTarget = CaptureTarget.GameView;
     private AnalysisMode analysisMode = AnalysisMode.Histogram;
@@ -20,10 +20,7 @@ public class ColorAnalyzerTool : EditorWindow
     private bool useLogScale = true;
     private float amplificationFactor = 2.0f;
 
-    private bool showRed = true;
-    private bool showGreen = true;
-    private bool showBlue = true;
-    private bool showLuminance = true;
+    private bool showRed = true, showGreen = true, showBlue = true, showLuminance = true;
 
     // ───────── Compute & resources
     private ComputeShader unifiedComputeShader;
@@ -43,7 +40,13 @@ public class ColorAnalyzerTool : EditorWindow
     private ComputeBuffer waveformBuffer;
     private RenderTexture waveformTexture;
     private Material waveformMaterial;
-    private float waveformExposure = 0.02f;   // 기본 노출
+    private float waveformExposure = 0.02f;
+
+    // Saliency
+    private RenderTexture saliencyTexture;
+    private RenderTexture saliencyPreview;
+    private Material saliencyMaterial;
+    private float saliencyExposure = 1.0f;
 
     // misc
     private bool resourcesLoaded = false;
@@ -53,7 +56,6 @@ public class ColorAnalyzerTool : EditorWindow
     private const int WAVEFORM_TEXTURE_HEIGHT = 200;
 
     // ─────────────────────────────────────────────────────────────────────────────
-
     [MenuItem("Window/Color Analysis Tool")]
     public static void ShowWindow()
     {
@@ -62,6 +64,7 @@ public class ColorAnalyzerTool : EditorWindow
         window.maxSize = new Vector2(600, 1200);
     }
 
+    // ───────── Lifecycle
     void OnEnable()
     {
         EditorApplication.update += OnEditorUpdate;
@@ -81,21 +84,22 @@ public class ColorAnalyzerTool : EditorWindow
         if (histogramTexture != null) { histogramTexture.Release(); DestroyImmediate(histogramTexture); }
         if (vectorscopeTexture != null) { vectorscopeTexture.Release(); DestroyImmediate(vectorscopeTexture); }
         if (waveformTexture != null) { waveformTexture.Release(); DestroyImmediate(waveformTexture); }
+        if (saliencyTexture != null) { saliencyTexture.Release(); DestroyImmediate(saliencyTexture); }
 
         if (histogramMaterial != null) DestroyImmediate(histogramMaterial);
         if (vectorscopeMaterial != null) DestroyImmediate(vectorscopeMaterial);
         if (waveformMaterial != null) DestroyImmediate(waveformMaterial);
+        if (saliencyMaterial != null) DestroyImmediate(saliencyMaterial);
     }
 
     // ───────── Resource loading
     void LoadResources()
     {
-        string computeShaderPath = $"{FOLDER_PATH}/UnifiedImageAnalysis.compute";
-        unifiedComputeShader = AssetDatabase.LoadAssetAtPath<ComputeShader>(computeShaderPath);
-
+        string csPath = $"{FOLDER_PATH}/UnifiedImageAnalysis.compute";
+        unifiedComputeShader = AssetDatabase.LoadAssetAtPath<ComputeShader>(csPath);
         if (unifiedComputeShader == null)
         {
-            Debug.LogError($"[ColorAnalyzerTool] Failed to load compute shader: {computeShaderPath}");
+            Debug.LogError($"[ColorAnalyzerTool] Compute shader not found: {csPath}");
             resourcesLoaded = false;
             return;
         }
@@ -103,15 +107,16 @@ public class ColorAnalyzerTool : EditorWindow
         LoadHistogramResources();
         LoadVectorscopeResources();
         LoadWaveformResources();
+        LoadSaliencyResources();
 
         resourcesLoaded = true;
     }
 
     void LoadHistogramResources()
     {
-        string shaderPath = $"{FOLDER_PATH}/Histogram.shader";
-        var shader = AssetDatabase.LoadAssetAtPath<Shader>(shaderPath);
-        if (shader == null) { Debug.LogError($"Histogram shader missing: {shaderPath}"); return; }
+        string path = $"{FOLDER_PATH}/Histogram.shader";
+        var shader = AssetDatabase.LoadAssetAtPath<Shader>(path);
+        if (shader == null) { Debug.LogError($"Histogram shader missing: {path}"); return; }
 
         histogramBuffer = new ComputeBuffer(256 * 4, sizeof(uint));
         histogramTexture = new RenderTexture(256, HISTOGRAM_TEXTURE_HEIGHT, 0, RenderTextureFormat.ARGB32)
@@ -123,9 +128,9 @@ public class ColorAnalyzerTool : EditorWindow
 
     void LoadVectorscopeResources()
     {
-        string shaderPath = $"{FOLDER_PATH}/Vectorscope.shader";
-        var shader = AssetDatabase.LoadAssetAtPath<Shader>(shaderPath);
-        if (shader == null) { Debug.LogWarning($"Vectorscope shader missing: {shaderPath}"); return; }
+        string path = $"{FOLDER_PATH}/Vectorscope.shader";
+        var shader = AssetDatabase.LoadAssetAtPath<Shader>(path);
+        if (shader == null) { Debug.LogWarning($"Vectorscope shader missing: {path}"); return; }
 
         vectorscopeBuffer = new ComputeBuffer(vectorscopeSize * vectorscopeSize, sizeof(uint));
         vectorscopeTexture = new RenderTexture(VECTORSCOPE_TEXTURE_SIZE, VECTORSCOPE_TEXTURE_SIZE, 0,
@@ -138,9 +143,9 @@ public class ColorAnalyzerTool : EditorWindow
 
     void LoadWaveformResources()
     {
-        string shaderPath = $"{FOLDER_PATH}/Waveform.shader";
-        var shader = AssetDatabase.LoadAssetAtPath<Shader>(shaderPath);
-        if (shader == null) { Debug.LogWarning($"Waveform shader missing: {shaderPath}"); return; }
+        string path = $"{FOLDER_PATH}/Waveform.shader";
+        var shader = AssetDatabase.LoadAssetAtPath<Shader>(path);
+        if (shader == null) { Debug.LogWarning($"Waveform shader missing: {path}"); return; }
 
         waveformTexture = new RenderTexture(512, WAVEFORM_TEXTURE_HEIGHT, 0, RenderTextureFormat.ARGB32)
         { enableRandomWrite = true, filterMode = FilterMode.Point, hideFlags = HideFlags.HideAndDontSave };
@@ -149,23 +154,29 @@ public class ColorAnalyzerTool : EditorWindow
         waveformMaterial = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
     }
 
-    // ───────── Update & UI
+    void LoadSaliencyResources()
+    {
+        string path = $"{FOLDER_PATH}/SaliencyMap.shader";
+        var shader = AssetDatabase.LoadAssetAtPath<Shader>(path);
+        if (shader == null) { Debug.LogWarning($"SaliencyMap shader missing: {path}"); return; }
+
+        saliencyMaterial = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
+    }
+
+    // ───────── Update & GUI
     void OnEditorUpdate()
     {
         if (autoUpdate && EditorApplication.timeSinceStartup - lastUpdateTime > updateInterval)
         {
             lastUpdateTime = EditorApplication.timeSinceStartup;
-            Capture();
-            Repaint();
+            Capture(); Repaint();
         }
     }
 
     void OnGUI()
     {
         EditorGUILayout.Space(5);
-
         DrawCaptureSection();
-
         EditorGUILayout.Space(6);
         DrawAnalysisSettingsSection();
 
@@ -188,7 +199,7 @@ public class ColorAnalyzerTool : EditorWindow
         DrawAnalysisSection();
     }
 
-    // ----- Capture settings UI
+    // ----- Capture UI
     void DrawCaptureSection()
     {
         EditorGUILayout.BeginVertical("box");
@@ -205,29 +216,24 @@ public class ColorAnalyzerTool : EditorWindow
         analysisMode = (AnalysisMode)EditorGUILayout.EnumPopup(analysisMode);
         EditorGUILayout.EndHorizontal();
 
-        EditorGUILayout.BeginHorizontal();
         autoUpdate = EditorGUILayout.Toggle("Auto Update", autoUpdate);
-        EditorGUILayout.EndHorizontal();
-
         EditorGUILayout.Space(5);
 
         if (GUILayout.Button("Capture", GUILayout.Height(20))) Capture();
-
         EditorGUILayout.EndVertical();
     }
 
-    // ----- Per-analysis options UI
+    // ----- Per-analysis option UI
     void DrawAnalysisSettingsSection()
     {
         EditorGUILayout.BeginVertical("box");
-
         switch (analysisMode)
         {
             case AnalysisMode.Histogram: DrawHistogramSettings(); break;
             case AnalysisMode.Vectorscope: DrawVectorscopeSettings(); break;
             case AnalysisMode.Waveform: DrawWaveformSettings(); break;
+            case AnalysisMode.Saliency: DrawSaliencySettings(); break;
         }
-
         EditorGUILayout.EndVertical();
     }
 
@@ -243,19 +249,19 @@ public class ColorAnalyzerTool : EditorWindow
 
         EditorGUILayout.Space(5);
         EditorGUILayout.BeginHorizontal();
-        if (GUILayout.Button("All")) { showRed = showGreen = showBlue = showLuminance = true; }
+        if (GUILayout.Button("All")) showRed = showGreen = showBlue = showLuminance = true;
         if (GUILayout.Button("RGB")) { showRed = showGreen = showBlue = true; showLuminance = false; }
         if (GUILayout.Button("Luma")) { showRed = showGreen = showBlue = false; showLuminance = true; }
-        if (GUILayout.Button("None")) { showRed = showGreen = showBlue = showLuminance = false; }
+        if (GUILayout.Button("None")) showRed = showGreen = showBlue = showLuminance = false;
         EditorGUILayout.EndHorizontal();
     }
 
-    void DrawChannelToggle(ref bool toggle, string label, Color color)
+    void DrawChannelToggle(ref bool toggle, string label, Color col)
     {
         EditorGUILayout.BeginHorizontal();
         toggle = EditorGUILayout.Toggle(toggle, GUILayout.Width(20));
-        var rect = GUILayoutUtility.GetRect(15, 15, GUILayout.Width(15));
-        EditorGUI.DrawRect(rect, toggle ? color : new Color(0.3f, 0.3f, 0.3f));
+        var r = GUILayoutUtility.GetRect(15, 15, GUILayout.Width(15));
+        EditorGUI.DrawRect(r, toggle ? col : new Color(0.3f, 0.3f, 0.3f));
         EditorGUILayout.LabelField(label, GUILayout.Width(80));
         GUILayout.FlexibleSpace();
         EditorGUILayout.EndHorizontal();
@@ -265,20 +271,22 @@ public class ColorAnalyzerTool : EditorWindow
     {
         EditorGUILayout.LabelField("Vectorscope Settings", EditorStyles.miniBoldLabel);
         EditorGUILayout.Space(3);
-
-        EditorGUILayout.BeginHorizontal();
-        EditorGUILayout.LabelField("Buffer Size:", GUILayout.Width(80));
-        vectorscopeSize = EditorGUILayout.IntSlider(vectorscopeSize, 128, 512);
-        EditorGUILayout.EndHorizontal();
+        vectorscopeSize = EditorGUILayout.IntSlider("Buffer Size", vectorscopeSize, 128, 512);
     }
 
     void DrawWaveformSettings()
     {
         EditorGUILayout.LabelField("Waveform Settings", EditorStyles.miniBoldLabel);
-        //waveformExposure = EditorGUILayout.Slider("Exposure",waveformExposure, 0.001f, 2.0f);
+        waveformExposure = EditorGUILayout.Slider("Exposure", waveformExposure, 0.001f, 2f);
     }
 
-    // ----- Preview image
+    void DrawSaliencySettings()
+    {
+        EditorGUILayout.LabelField("Saliency Settings", EditorStyles.miniBoldLabel);
+        saliencyExposure = EditorGUILayout.Slider("Exposure", saliencyExposure, 0.01f, 5f);
+    }
+
+    // ----- Preview
     void DrawPreviewSection()
     {
         EditorGUILayout.Space(8);
@@ -289,13 +297,16 @@ public class ColorAnalyzerTool : EditorWindow
         float width = EditorGUIUtility.currentViewWidth - 30;
         float height = Mathf.Min(width / aspect, 200f);
 
-        Rect rect = GUILayoutUtility.GetRect(width, height);
+        var rect = GUILayoutUtility.GetRect(width, height);
         EditorGUI.DrawRect(rect, new Color(0.2f, 0.2f, 0.2f));
         GUI.DrawTexture(rect, capturedTexture, ScaleMode.ScaleToFit);
 
         EditorGUILayout.BeginHorizontal();
         EditorGUILayout.LabelField($"Size: {capturedTexture.width}×{capturedTexture.height}", EditorStyles.miniLabel);
-        GUILayout.FlexibleSpace(); GUILayout.Toggle(autoUpdate, "Auto", GUILayout.Width(50));
+        GUILayout.FlexibleSpace();
+        EditorGUI.BeginDisabledGroup(true);                 // 읽기 전용 표시
+        EditorGUILayout.Toggle("Auto", autoUpdate, GUILayout.Width(50));
+        EditorGUI.EndDisabledGroup();
         EditorGUILayout.EndHorizontal();
     }
 
@@ -303,20 +314,13 @@ public class ColorAnalyzerTool : EditorWindow
     void DrawAnalysisSection()
     {
         EditorGUILayout.Space(15);
-        string title = analysisMode switch
-        {
-            AnalysisMode.Histogram => "Color Histogram",
-            AnalysisMode.Vectorscope => "Vectorscope",
-            AnalysisMode.Waveform => "Waveform",
-            _ => "Analysis"
-        };
-        EditorGUILayout.LabelField(title, EditorStyles.boldLabel);
+        EditorGUILayout.LabelField(analysisMode.ToString(), EditorStyles.boldLabel);
         EditorGUILayout.Space(3);
 
         float winW = EditorGUIUtility.currentViewWidth - 30;
         float viewH = analysisMode == AnalysisMode.Vectorscope ? winW
                    : Mathf.Clamp(winW * 0.6f, 120f, 250f);
-        Rect rect = GUILayoutUtility.GetRect(winW, viewH);
+        var rect = GUILayoutUtility.GetRect(winW, viewH);
         EditorGUI.DrawRect(rect, new Color(0.15f, 0.15f, 0.15f));
 
         if (Event.current.type == EventType.Repaint)
@@ -326,12 +330,13 @@ public class ColorAnalyzerTool : EditorWindow
                 AnalysisMode.Histogram => histogramTexture,
                 AnalysisMode.Vectorscope => vectorscopeTexture,
                 AnalysisMode.Waveform => waveformTexture,
+                AnalysisMode.Saliency => saliencyPreview,
                 _ => null
             };
             if (tex != null) GUI.DrawTexture(rect, tex, ScaleMode.StretchToFill);
         }
 
-        // Info bar
+        // info bar
         EditorGUILayout.BeginHorizontal();
         switch (analysisMode)
         {
@@ -345,6 +350,9 @@ public class ColorAnalyzerTool : EditorWindow
             case AnalysisMode.Waveform:
                 EditorGUILayout.LabelField($"Resolution: {capturedTexture.width}×{capturedTexture.height}", EditorStyles.miniLabel);
                 break;
+            case AnalysisMode.Saliency:
+                EditorGUILayout.LabelField($"SaliencyMap: {capturedTexture.width}×{capturedTexture.height}", EditorStyles.miniLabel);
+                break;
         }
         GUILayout.FlexibleSpace();
         EditorGUILayout.LabelField($"Analysis: {analysisMode}", EditorStyles.miniLabel);
@@ -355,17 +363,15 @@ public class ColorAnalyzerTool : EditorWindow
     void Capture()
     {
         if (!resourcesLoaded) return;
-        RenderTexture src = CaptureFromCamera();
+        var src = CaptureFromCamera();
         if (src == null) return;
 
         switch (analysisMode)
         {
-            case AnalysisMode.Histogram:
-                AnalyzeHistogram(src); DrawHistogramWithShader(); break;
-            case AnalysisMode.Vectorscope:
-                AnalyzeVectorscope(src); DrawVectorscopeWithShader(); break;
-            case AnalysisMode.Waveform:
-                AnalyzeWaveform(src); DrawWaveformWithShader(); break;
+            case AnalysisMode.Histogram: AnalyzeHistogram(src); DrawHistogramWithShader(); break;
+            case AnalysisMode.Vectorscope: AnalyzeVectorscope(src); DrawVectorscopeWithShader(); break;
+            case AnalysisMode.Waveform: AnalyzeWaveform(src); DrawWaveformWithShader(); break;
+            case AnalysisMode.Saliency: AnalyzeSaliency(src); DrawSaliencyWithShader(); break;
         }
         RenderTexture.ReleaseTemporary(src);
     }
@@ -386,7 +392,6 @@ public class ColorAnalyzerTool : EditorWindow
 
         var prev = cam.targetTexture;
         cam.targetTexture = linearRT; cam.Render(); cam.targetTexture = prev;
-
         Graphics.Blit(linearRT, srgbRT);
         RenderTexture.ReleaseTemporary(linearRT);
 
@@ -496,10 +501,56 @@ public class ColorAnalyzerTool : EditorWindow
         GL.Clear(true, true, Color.black);
 
         waveformMaterial.SetBuffer("_WaveformBuffer", waveformBuffer);
-        waveformMaterial.SetVector("_Params",new Vector3(capturedTexture.width,capturedTexture.height,waveformExposure));
-
+        waveformMaterial.SetVector("_Params", new Vector3(capturedTexture.width, capturedTexture.height, waveformExposure));
 
         DrawFullScreenQuad(waveformMaterial);
+    }
+
+    // ----- Saliency
+    void AnalyzeSaliency(RenderTexture src)
+    {
+        int kernel = unifiedComputeShader.FindKernel("KSaliencyMap");
+
+        if (saliencyTexture == null || saliencyTexture.width != src.width || saliencyTexture.height != src.height)
+        {
+            if (saliencyTexture != null) saliencyTexture.Release();
+            saliencyTexture = new RenderTexture(src.width, src.height, 0, RenderTextureFormat.RFloat)
+            { enableRandomWrite = true, hideFlags = HideFlags.HideAndDontSave };
+            saliencyTexture.Create();
+        }
+
+        unifiedComputeShader.SetTexture(kernel, "_Source", src);
+        unifiedComputeShader.SetTexture(kernel, "_SaliencyMap", saliencyTexture);
+        unifiedComputeShader.SetVector("_Params", new Vector4(src.width, src.height, 0, 0));
+
+        unifiedComputeShader.Dispatch(kernel,
+            Mathf.CeilToInt(src.width / 16f),
+            Mathf.CeilToInt(src.height / 16f),
+            1);
+    }
+
+    void DrawSaliencyWithShader()
+    {
+        if (saliencyMaterial == null || saliencyTexture == null) return;
+
+        // ──  미리보기용 RT 준비
+        if (saliencyPreview == null ||
+            saliencyPreview.width != saliencyTexture.width ||
+            saliencyPreview.height != saliencyTexture.height)
+        {
+            if (saliencyPreview != null) saliencyPreview.Release();
+            saliencyPreview = new RenderTexture(
+                saliencyTexture.width, saliencyTexture.height, 0,
+                RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+            saliencyPreview.hideFlags = HideFlags.HideAndDontSave;
+            saliencyPreview.filterMode = FilterMode.Point;
+            saliencyPreview.enableRandomWrite = false; // 그냥 Blit용
+            saliencyPreview.Create();
+        }
+
+        // ──  Heat-map 변환 (읽기: RFloat, 쓰기: ARGB32)
+        saliencyMaterial.SetFloat("_Exposure", saliencyExposure);
+        Graphics.Blit(saliencyTexture, saliencyPreview, saliencyMaterial);
     }
 
     // ───────── Utility
