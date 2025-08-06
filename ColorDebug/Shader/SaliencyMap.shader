@@ -4,6 +4,8 @@ Shader "Hidden/SaliencyMap"
     {
         _MainTex ("Texture", 2D) = "white" {}
         _Exposure ("Exposure", Float) = 1.0
+        _Normalize ("Normalize", Float) = 0.0
+        _MinMax ("MinMax", Vector) = (0,1,0,0)
     }
     SubShader
     {
@@ -20,6 +22,8 @@ Shader "Hidden/SaliencyMap"
             sampler2D _MainTex;
             float4 _MainTex_ST;
             float _Exposure;
+            float _Normalize;
+            float4 _MinMax;
 
             struct appdata
             {
@@ -41,40 +45,40 @@ Shader "Hidden/SaliencyMap"
                 return o;
             }
 
-            // °³¼±µÈ È÷Æ®¸Ê ÄÃ·¯ - 5´Ü°è ±×¶óµ¥ÀÌ¼Ç
+            // ì»¤ìŠ¤í…€ íˆíŠ¸ë§µ ì»¬ëŸ¬ - 5ë‹¨ê³„ ê·¸ë¼ë°ì´ì…˜
             float3 HeatmapColor(float t)
             {
                 t = saturate(t);
                 
-                // 5´Ü°è È÷Æ®¸Ê: °ËÁ¤ -> ÆÄ¶û -> Ã»·Ï -> ÃÊ·Ï -> ³ë¶û -> »¡°­
-                if (t < 0.2)  // °ËÁ¤ -> ÆÄ¶û
+                // 5ë‹¨ê³„ íˆíŠ¸ë§µ: ê²€ì • -> íŒŒë‘ -> ì²­ë¡ -> ì´ˆë¡ -> ë…¸ë‘ -> ë¹¨ê°•
+                if (t < 0.2)  // ê²€ì • -> íŒŒë‘
                 {
                     float factor = t / 0.2;
                     return lerp(float3(0.0, 0.0, 0.0), float3(0.0, 0.0, 1.0), factor);
                 }
-                else if (t < 0.4)  // ÆÄ¶û -> Ã»·Ï
+                else if (t < 0.4)  // íŒŒë‘ -> ì²­ë¡
                 {
                     float factor = (t - 0.2) / 0.2;
                     return lerp(float3(0.0, 0.0, 1.0), float3(0.0, 1.0, 1.0), factor);
                 }
-                else if (t < 0.6)  // Ã»·Ï -> ÃÊ·Ï
+                else if (t < 0.6)  // ì²­ë¡ -> ì´ˆë¡
                 {
                     float factor = (t - 0.4) / 0.2;
                     return lerp(float3(0.0, 1.0, 1.0), float3(0.0, 1.0, 0.0), factor);
                 }
-                else if (t < 0.8) // ÃÊ·Ï -> ³ë¶û
+                else if (t < 0.8) // ì´ˆë¡ -> ë…¸ë‘
                 {
                     float factor = (t - 0.6) / 0.2;
                     return lerp(float3(0.0, 1.0, 0.0), float3(1.0, 1.0, 0.0), factor);
                 }
-                else // ³ë¶û -> »¡°­
+                else // ë…¸ë‘ -> ë¹¨ê°•
                 {
                     float factor = (t - 0.8) / 0.2;
                     return lerp(float3(1.0, 1.0, 0.0), float3(1.0, 0.0, 0.0), factor);
                 }
             }
 
-            // ´ë¾È: Turbo ÄÃ·¯¸Ê (´õ ¼±¸íÇÑ ´ëºñ)
+            // ëŒ€ì•ˆ: Turbo ì»¬ëŸ¬ë§µ (ë” ë¶€ë“œëŸ¬ìš´ í‘œí˜„)
             float3 TurboColormap(float t)
             {
                 t = saturate(t);
@@ -98,24 +102,36 @@ Shader "Hidden/SaliencyMap"
 
             float4 frag(v2f i) : SV_Target
             {
-                // R Ã¤³Î¿¡¼­ saliency °ª ÀĞ±â
+                // R ì±„ë„ì—ì„œ saliency ê°’ ì½ê¸°
                 float saliency = tex2D(_MainTex, i.uv).r;
                 
-                // Exposure Àû¿ë
-                saliency *= _Exposure;
-                saliency = saturate(saliency);
+                if (_Normalize > 0.5)
+                {
+                    float minVal = _MinMax.x;
+                    float maxVal = _MinMax.y;
+                    if (maxVal - minVal > 0.0001)
+                    {
+                        saliency = (saliency - minVal) / (maxVal - minVal);
+                    }
+                    else
+                    {
+                        saliency = 0.0;
+                    }
+                }
+                else
+                {
+                    // Exposure ì ìš©
+                    saliency *= _Exposure;
+                }
                 
-                // ´ëºñ¸¦ °­È­ÇÏ±â À§ÇÑ °î¼± Á¶Á¤
-                saliency = smoothstep(0.0, 1.0, saliency);
+                // ëŒ€ë¹„(contrast)ë¥¼ ë†’ì—¬ì„œ ë” ê·¹ì ì¸ íš¨ê³¼ë¥¼ ì¤Œ
+                saliency = pow(saliency, 2.0); 
                 
-                // Ãß°¡ °¨¸¶ º¸Á¤À¸·Î ±Ø°ª °­Á¶
-                saliency = pow(saliency, 0.7);
-                
-                // È÷Æ®¸Ê »ö»ó Àû¿ë
+                // íˆíŠ¸ë§µ ìƒ‰ìƒ ì ìš©
                 float3 color = HeatmapColor(saliency);
                 
-                // ´ë¾È: ´õ ¼±¸íÇÑ Turbo ÄÃ·¯¸Ê »ç¿ë
-                // float3 color = TurboColormap(saliency);
+                // ëŒ€ì•ˆ: ë” ë¶€ë“œëŸ¬ìš´ Turbo ì»¬ëŸ¬ë§µ ì‚¬ìš©
+                //float3 color = TurboColormap(saliency);
                 
                 return float4(color, 1.0);
             }

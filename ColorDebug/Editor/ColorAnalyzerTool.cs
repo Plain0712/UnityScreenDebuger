@@ -1,5 +1,6 @@
-﻿using UnityEngine;
+using UnityEngine;
 using UnityEditor;
+using System.Linq;
 
 public class ColorAnalyzerTool : EditorWindow
 {
@@ -47,6 +48,9 @@ public class ColorAnalyzerTool : EditorWindow
     private RenderTexture saliencyPreview;
     private Material saliencyMaterial;
     private float saliencyExposure = 2.0f; // 기본값 조정
+    private bool saliencyNormalize = true;
+    private ComputeBuffer minMaxBuffer;
+    private struct MinMax { public float min; public float max; };
 
     // misc
     private bool resourcesLoaded = false;
@@ -80,6 +84,7 @@ public class ColorAnalyzerTool : EditorWindow
         histogramBuffer?.Release();
         vectorscopeBuffer?.Release();
         waveformBuffer?.Release();
+        minMaxBuffer?.Release();
 
         if (histogramTexture != null) { histogramTexture.Release(); DestroyImmediate(histogramTexture); }
         if (vectorscopeTexture != null) { vectorscopeTexture.Release(); DestroyImmediate(vectorscopeTexture); }
@@ -167,6 +172,7 @@ public class ColorAnalyzerTool : EditorWindow
         }
 
         saliencyMaterial = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
+        // minMaxBuffer will be created on demand
         Debug.Log("[ColorAnalyzerTool] Saliency resources loaded successfully");
     }
 
@@ -292,15 +298,11 @@ public class ColorAnalyzerTool : EditorWindow
         EditorGUILayout.LabelField("Saliency Settings", EditorStyles.miniBoldLabel);
         EditorGUILayout.Space(3);
 
-        saliencyExposure = EditorGUILayout.Slider("Intensity", saliencyExposure, 0.1f, 10f);
+        saliencyNormalize = EditorGUILayout.Toggle("Auto-Normalize", saliencyNormalize);
 
-        EditorGUILayout.Space(3);
-        EditorGUILayout.BeginHorizontal();
-        if (GUILayout.Button("Low", GUILayout.Width(50))) saliencyExposure = 0.5f;
-        if (GUILayout.Button("Normal", GUILayout.Width(60))) saliencyExposure = 2.0f;
-        if (GUILayout.Button("High", GUILayout.Width(50))) saliencyExposure = 5.0f;
-        if (GUILayout.Button("Max", GUILayout.Width(50))) saliencyExposure = 10.0f;
-        EditorGUILayout.EndHorizontal();
+        EditorGUI.BeginDisabledGroup(saliencyNormalize);
+        saliencyExposure = EditorGUILayout.Slider("Intensity", saliencyExposure, 0.1f, 10f);
+        EditorGUI.EndDisabledGroup();
 
         EditorGUILayout.Space(2);
         EditorGUILayout.LabelField("Red = High Saliency, Blue = Low Saliency", EditorStyles.miniLabel);
@@ -577,11 +579,12 @@ public class ColorAnalyzerTool : EditorWindow
     // ----- Saliency
     void AnalyzeSaliency(RenderTexture src)
     {
-        int kernel = unifiedComputeShader.FindKernel("KSaliencyMap");
+        int kSaliency = unifiedComputeShader.FindKernel("KSaliencyMap");
+        int kReduce = unifiedComputeShader.FindKernel("KSaliencyReduce");
 
-        if (kernel < 0)
+        if (kSaliency < 0 || kReduce < 0)
         {
-            Debug.LogError("[ColorAnalyzerTool] KSaliencyMap kernel not found in compute shader");
+            Debug.LogError("[ColorAnalyzerTool] Saliency kernels not found in compute shader");
             return;
         }
 
@@ -610,15 +613,30 @@ public class ColorAnalyzerTool : EditorWindow
             Debug.Log($"[ColorAnalyzerTool] Created saliency texture: {src.width}x{src.height}");
         }
 
-        // Compute shader 실행
-        unifiedComputeShader.SetTexture(kernel, "_Source", src);
-        unifiedComputeShader.SetTexture(kernel, "_SaliencyMap", saliencyTexture);
+        // 1. Saliency Map 생성
+        unifiedComputeShader.SetTexture(kSaliency, "_Source", src);
+        unifiedComputeShader.SetTexture(kSaliency, "_SaliencyMap", saliencyTexture);
         unifiedComputeShader.SetVector("_Params", new Vector4(src.width, src.height, 0, 0));
 
         int threadGroupsX = Mathf.CeilToInt(src.width / 16f);
         int threadGroupsY = Mathf.CeilToInt(src.height / 16f);
 
-        unifiedComputeShader.Dispatch(kernel, threadGroupsX, threadGroupsY, 1);
+        unifiedComputeShader.Dispatch(kSaliency, threadGroupsX, threadGroupsY, 1);
+
+        // 2. Min/Max 값 계산 (정규화가 필요할 경우)
+        if (saliencyNormalize)
+        {
+            int numGroups = threadGroupsX * threadGroupsY;
+            if (minMaxBuffer == null || minMaxBuffer.count != numGroups)
+            {
+                minMaxBuffer?.Release();
+                minMaxBuffer = new ComputeBuffer(numGroups, sizeof(float) * 2);
+            }
+
+            unifiedComputeShader.SetTexture(kReduce, "_SaliencyMap", saliencyTexture);
+            unifiedComputeShader.SetBuffer(kReduce, "_MinMaxBuffer", minMaxBuffer);
+            unifiedComputeShader.Dispatch(kReduce, threadGroupsX, threadGroupsY, 1);
+        }
 
         Debug.Log($"[ColorAnalyzerTool] Saliency analysis dispatched: {threadGroupsX}x{threadGroupsY} thread groups");
     }
@@ -659,6 +677,19 @@ public class ColorAnalyzerTool : EditorWindow
         // Heat-map 변환
         saliencyMaterial.SetFloat("_Exposure", saliencyExposure);
         saliencyMaterial.SetTexture("_MainTex", saliencyTexture);
+        saliencyMaterial.SetFloat("_Normalize", saliencyNormalize ? 1.0f : 0.0f);
+
+        if (saliencyNormalize)
+        {
+            int numGroups = Mathf.CeilToInt(saliencyTexture.width / 16f) * Mathf.CeilToInt(saliencyTexture.height / 16f);
+            var data = new MinMax[numGroups];
+            minMaxBuffer.GetData(data);
+
+            float minVal = data.Select(d => d.min).Min();
+            float maxVal = data.Select(d => d.max).Max();
+
+            saliencyMaterial.SetVector("_MinMax", new Vector4(minVal, maxVal, 0, 0));
+        }
 
         Graphics.Blit(saliencyTexture, saliencyPreview, saliencyMaterial);
 

@@ -1,4 +1,4 @@
-﻿// Unified Image Analysis Compute Shader
+// Unified Image Analysis Compute Shader
 // Contains Histogram, Vectorscope, Waveform, and Saliency analysis
 
 #pragma kernel KHistogramClear
@@ -8,6 +8,7 @@
 #pragma kernel KWaveformClear
 #pragma kernel KWaveformGather
 #pragma kernel KSaliencyMap
+#pragma kernel KSaliencyReduce
 
 #define HISTOGRAM_BINS 256
 #define GROUP_SIZE_X 16
@@ -154,6 +155,14 @@ void KWaveformGather(uint2 id : SV_DispatchThreadID)
 // ========================================
 // _Params: x = source width, y = source height, z/w = unused
 RWTexture2D<float> _SaliencyMap;
+struct MinMax
+{
+    float minVal;
+    float maxVal;
+};
+RWStructuredBuffer<MinMax> _MinMaxBuffer;
+groupshared MinMax minMaxShared[GROUP_SIZE_X * GROUP_SIZE_Y];
+
 
 [numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
 void KSaliencyMap(uint2 id : SV_DispatchThreadID)
@@ -270,4 +279,40 @@ void KSaliencyMap(uint2 id : SV_DispatchThreadID)
     saliency = pow(saliency, 0.8);
 
     _SaliencyMap[id] = saliency;
+}
+
+[numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
+void KSaliencyReduce(uint3 id : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex, uint3 groupID : SV_GroupID)
+{
+    uint2 dim;
+    _SaliencyMap.GetDimensions(dim.x, dim.y);
+
+    // 각 스레드가 saliency map에서 값을 하나씩 로드
+    float val = 1.0; // out-of-bounds일 경우를 대비한 기본값
+    if (id.x < dim.x && id.y < dim.y) {
+        val = _SaliencyMap[id.xy];
+    }
+
+    minMaxShared[groupIndex].minVal = val;
+    minMaxShared[groupIndex].maxVal = val;
+    GroupMemoryBarrierWithGroupSync();
+
+    // 그룹 내에서 병렬 감소 연산
+    for (uint s = (GROUP_SIZE_X * GROUP_SIZE_Y) / 2; s > 0; s >>= 1)
+    {
+        if (groupIndex < s)
+        {
+            minMaxShared[groupIndex].minVal = min(minMaxShared[groupIndex].minVal, minMaxShared[groupIndex + s].minVal);
+            minMaxShared[groupIndex].maxVal = max(minMaxShared[groupIndex].maxVal, minMaxShared[groupIndex + s].maxVal);
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    // 그룹의 첫 번째 스레드가 그룹의 결과를 버퍼에 기록
+    if (groupIndex == 0)
+    {
+        uint numGroupsX = (dim.x + GROUP_SIZE_X - 1) / GROUP_SIZE_X;
+        uint bufferIndex = groupID.y * numGroupsX + groupID.x;
+        _MinMaxBuffer[bufferIndex] = minMaxShared[0];
+    }
 }
