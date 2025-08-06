@@ -36,6 +36,8 @@ public class ColorAnalyzerTool : EditorWindow
     private RenderTexture vectorscopeTexture;
     private Material vectorscopeMaterial;
     private int vectorscopeSize = 256;
+    private Texture2D vectorscopeGuide;
+
 
     // Waveform
     private ComputeBuffer waveformBuffer;
@@ -146,6 +148,10 @@ public class ColorAnalyzerTool : EditorWindow
         vectorscopeTexture.Create();
 
         vectorscopeMaterial = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
+        string guidePath = $"Assets/Script/UnityScreenDebuger/ColorDebug/Texture/ColorScope.png";
+        vectorscopeGuide = AssetDatabase.LoadAssetAtPath<Texture2D>(guidePath);
+        if (vectorscopeGuide == null)
+            Debug.LogWarning($"[ColorAnalyzerTool] Vectorscope guide not found: {guidePath}");
     }
 
     void LoadWaveformResources()
@@ -298,10 +304,10 @@ public class ColorAnalyzerTool : EditorWindow
         EditorGUILayout.LabelField("Saliency Settings", EditorStyles.miniBoldLabel);
         EditorGUILayout.Space(3);
 
-        saliencyNormalize = EditorGUILayout.Toggle("Auto-Normalize", saliencyNormalize);
+        //saliencyNormalize = EditorGUILayout.Toggle("Auto-Normalize", saliencyNormalize);
 
-        EditorGUI.BeginDisabledGroup(saliencyNormalize);
-        saliencyExposure = EditorGUILayout.Slider("Intensity", saliencyExposure, 0.1f, 10f);
+        //EditorGUI.BeginDisabledGroup(saliencyNormalize);
+        //saliencyExposure = EditorGUILayout.Slider("Intensity", saliencyExposure, 0.1f, 10f);
         EditorGUI.EndDisabledGroup();
 
         EditorGUILayout.Space(2);
@@ -347,15 +353,32 @@ public class ColorAnalyzerTool : EditorWindow
 
         if (Event.current.type == EventType.Repaint)
         {
+            // ───── Vectorscope 전용: 가이드 + 결과 오버레이 ─────
+            if (analysisMode == AnalysisMode.Vectorscope)
+            {
+
+                // 1) 색상환 가이드 (불투명)
+                if (vectorscopeGuide != null)
+                    GUI.DrawTexture(rect, vectorscopeGuide, ScaleMode.StretchToFill);
+
+                // 2) 연산 결과 텍스처 (알파 포함)
+                if (vectorscopeTexture != null)
+                    GUI.DrawTexture(rect, vectorscopeTexture, ScaleMode.StretchToFill);
+
+                return; // 여기서 끝내면 아래 공용 코드 실행 안 함
+            }
+
+            // ───── 공용 처리: 모드별 결과 텍스처 하나만 ─────
             RenderTexture tex = analysisMode switch
             {
                 AnalysisMode.Histogram => histogramTexture,
-                AnalysisMode.Vectorscope => vectorscopeTexture,
                 AnalysisMode.Waveform => waveformTexture,
                 AnalysisMode.Saliency => saliencyPreview,
                 _ => null
             };
-            if (tex != null) GUI.DrawTexture(rect, tex, ScaleMode.StretchToFill);
+
+            if (tex != null)
+                GUI.DrawTexture(rect, tex, ScaleMode.StretchToFill);
         }
 
         // info bar
@@ -534,7 +557,7 @@ public class ColorAnalyzerTool : EditorWindow
         if (vectorscopeBuffer == null || vectorscopeTexture == null || vectorscopeMaterial == null) return;
 
         RenderTexture.active = vectorscopeTexture;
-        GL.Clear(true, true, Color.black);
+        GL.Clear(true, true, Color.clear);   // 투명 RT 확보
 
         vectorscopeMaterial.SetBuffer("_VectorscopeBuffer", vectorscopeBuffer);
         vectorscopeMaterial.SetVector("_Params", new Vector2(vectorscopeSize, VECTORSCOPE_TEXTURE_SIZE));
