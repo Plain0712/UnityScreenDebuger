@@ -346,24 +346,30 @@ public class ColorAnalyzerTool : EditorWindow
         EditorGUILayout.Space(3);
 
         float winW = EditorGUIUtility.currentViewWidth - 30;
-        float viewH = analysisMode == AnalysisMode.Vectorscope ? winW
-                   : Mathf.Clamp(winW * 0.6f, 120f, 250f);
+        // Vectorscope는 높이를 절반으로 줄이고, 나머지는 원래 비율 유지
+        float viewH = analysisMode == AnalysisMode.Vectorscope ? winW / 2f
+                               : Mathf.Clamp(winW * 0.6f, 120f, 250f);
+
         var rect = GUILayoutUtility.GetRect(winW, viewH);
-        EditorGUI.DrawRect(rect, new Color(0.15f, 0.15f, 0.15f));
+        EditorGUI.DrawRect(rect, Color.black);
 
         if (Event.current.type == EventType.Repaint)
         {
             // ───── Vectorscope 전용: 가이드 + 결과 오버레이 ─────
             if (analysisMode == AnalysisMode.Vectorscope)
             {
+                // 뷰의 높이를 기준으로 정사각형 scopeRect를 계산하고 중앙에 배치
+                float scopeSize = rect.height;
+                float xOffset = (rect.width - scopeSize) / 2;
+                var scopeRect = new Rect(rect.x + xOffset, rect.y, scopeSize, scopeSize);
 
                 // 1) 색상환 가이드 (불투명)
                 if (vectorscopeGuide != null)
-                    GUI.DrawTexture(rect, vectorscopeGuide, ScaleMode.StretchToFill);
+                    GUI.DrawTexture(scopeRect, vectorscopeGuide, ScaleMode.StretchToFill);
 
                 // 2) 연산 결과 텍스처 (알파 포함)
                 if (vectorscopeTexture != null)
-                    GUI.DrawTexture(rect, vectorscopeTexture, ScaleMode.StretchToFill);
+                    GUI.DrawTexture(scopeRect, vectorscopeTexture, ScaleMode.StretchToFill);
 
                 return; // 여기서 끝내면 아래 공용 코드 실행 안 함
             }
