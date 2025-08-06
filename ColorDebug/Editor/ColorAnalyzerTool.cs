@@ -44,6 +44,7 @@ public class ColorAnalyzerTool : EditorWindow
     private RenderTexture waveformTexture;
     private Material waveformMaterial;
     private float waveformExposure = 0.02f;
+    private bool showRed_Waveform = true, showGreen_Waveform = true, showBlue_Waveform = true;
 
     // Saliency
     private RenderTexture saliencyTexture;
@@ -118,7 +119,7 @@ public class ColorAnalyzerTool : EditorWindow
         LoadSaliencyResources();
 
         resourcesLoaded = true;
-        Debug.Log("[ColorAnalyzerTool] All resources loaded successfully");
+        
     }
 
     void LoadHistogramResources()
@@ -139,7 +140,7 @@ public class ColorAnalyzerTool : EditorWindow
     {
         string path = $"{FOLDER_PATH}/Vectorscope.shader";
         var shader = AssetDatabase.LoadAssetAtPath<Shader>(path);
-        if (shader == null) { Debug.LogWarning($"Vectorscope shader missing: {path}"); return; }
+        
 
         vectorscopeBuffer = new ComputeBuffer(vectorscopeSize * vectorscopeSize, sizeof(uint));
         vectorscopeTexture = new RenderTexture(VECTORSCOPE_TEXTURE_SIZE, VECTORSCOPE_TEXTURE_SIZE, 0,
@@ -150,15 +151,14 @@ public class ColorAnalyzerTool : EditorWindow
         vectorscopeMaterial = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
         string guidePath = $"Assets/Script/UnityScreenDebuger/ColorDebug/Texture/ColorScope.png";
         vectorscopeGuide = AssetDatabase.LoadAssetAtPath<Texture2D>(guidePath);
-        if (vectorscopeGuide == null)
-            Debug.LogWarning($"[ColorAnalyzerTool] Vectorscope guide not found: {guidePath}");
+        
     }
 
     void LoadWaveformResources()
     {
         string path = $"{FOLDER_PATH}/Waveform.shader";
         var shader = AssetDatabase.LoadAssetAtPath<Shader>(path);
-        if (shader == null) { Debug.LogWarning($"Waveform shader missing: {path}"); return; }
+        
 
         waveformTexture = new RenderTexture(512, WAVEFORM_TEXTURE_HEIGHT, 0, RenderTextureFormat.ARGB32)
         { enableRandomWrite = true, filterMode = FilterMode.Point, hideFlags = HideFlags.HideAndDontSave };
@@ -179,7 +179,7 @@ public class ColorAnalyzerTool : EditorWindow
 
         saliencyMaterial = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
         // minMaxBuffer will be created on demand
-        Debug.Log("[ColorAnalyzerTool] Saliency resources loaded successfully");
+        
     }
 
     // ───────── Update & GUI
@@ -296,7 +296,20 @@ public class ColorAnalyzerTool : EditorWindow
     void DrawWaveformSettings()
     {
         EditorGUILayout.LabelField("Waveform Settings", EditorStyles.miniBoldLabel);
-        waveformExposure = EditorGUILayout.Slider("Exposure", waveformExposure, 0.001f, 2f);
+        //waveformExposure = EditorGUILayout.Slider("Exposure", waveformExposure, 0.001f, 2f);
+
+        EditorGUILayout.Space(3);
+        EditorGUILayout.LabelField("Channel Visibility", EditorStyles.miniBoldLabel);
+        DrawChannelToggle(ref showRed_Waveform, "Red Channel", Color.red);
+        DrawChannelToggle(ref showGreen_Waveform, "Green Channel", Color.green);
+        DrawChannelToggle(ref showBlue_Waveform, "Blue Channel", Color.blue);
+
+        EditorGUILayout.Space(5);
+        EditorGUILayout.BeginHorizontal();
+        if (GUILayout.Button("All")) showRed_Waveform = showGreen_Waveform = showBlue_Waveform = true;
+        if (GUILayout.Button("RGB")) { showRed_Waveform = showGreen_Waveform = showBlue_Waveform = true; }
+        if (GUILayout.Button("None")) showRed_Waveform = showGreen_Waveform = showBlue_Waveform = false;
+        EditorGUILayout.EndHorizontal();
     }
 
     void DrawSaliencySettings()
@@ -399,7 +412,8 @@ public class ColorAnalyzerTool : EditorWindow
                 EditorGUILayout.LabelField($"Buffer: {vectorscopeSize}×{vectorscopeSize}", EditorStyles.miniLabel);
                 break;
             case AnalysisMode.Waveform:
-                EditorGUILayout.LabelField($"Resolution: {capturedTexture.width}×{capturedTexture.height}", EditorStyles.miniLabel);
+                int ch_w = (showRed_Waveform ? 1 : 0) + (showGreen_Waveform ? 1 : 0) + (showBlue_Waveform ? 1 : 0);
+                EditorGUILayout.LabelField($"Active Channels: {ch_w}/3", EditorStyles.miniLabel);
                 break;
             case AnalysisMode.Saliency:
                 string status = (saliencyTexture != null && saliencyPreview != null) ? "Ready" : "Error";
@@ -414,18 +428,10 @@ public class ColorAnalyzerTool : EditorWindow
     // ───────── Capture & analysis
     void Capture()
     {
-        if (!resourcesLoaded)
-        {
-            Debug.LogWarning("[ColorAnalyzerTool] Resources not loaded, skipping capture");
-            return;
-        }
+        
 
         var src = CaptureFromCamera();
-        if (src == null)
-        {
-            Debug.LogWarning("[ColorAnalyzerTool] Failed to capture from camera");
-            return;
-        }
+        
 
         try
         {
@@ -499,7 +505,7 @@ public class ColorAnalyzerTool : EditorWindow
         capturedTexture.Apply();
         RenderTexture.active = null;
 
-        Debug.Log($"[ColorAnalyzerTool] Captured {w}x{h} image from {captureTarget}");
+        
         return srgbRT;
     }
 
@@ -601,6 +607,9 @@ public class ColorAnalyzerTool : EditorWindow
 
         waveformMaterial.SetBuffer("_WaveformBuffer", waveformBuffer);
         waveformMaterial.SetVector("_Params", new Vector3(capturedTexture.width, capturedTexture.height, waveformExposure));
+        waveformMaterial.SetFloat("_ShowRed", showRed_Waveform ? 1 : 0);
+        waveformMaterial.SetFloat("_ShowGreen", showGreen_Waveform ? 1 : 0);
+        waveformMaterial.SetFloat("_ShowBlue", showBlue_Waveform ? 1 : 0);
 
         DrawFullScreenQuad(waveformMaterial);
     }
@@ -639,7 +648,7 @@ public class ColorAnalyzerTool : EditorWindow
                 return;
             }
 
-            Debug.Log($"[ColorAnalyzerTool] Created saliency texture: {src.width}x{src.height}");
+            
         }
 
         // 1. Saliency Map 생성
@@ -667,7 +676,7 @@ public class ColorAnalyzerTool : EditorWindow
             unifiedComputeShader.Dispatch(kReduce, threadGroupsX, threadGroupsY, 1);
         }
 
-        Debug.Log($"[ColorAnalyzerTool] Saliency analysis dispatched: {threadGroupsX}x{threadGroupsY} thread groups");
+        
     }
 
     void DrawSaliencyWithShader()
@@ -722,7 +731,7 @@ public class ColorAnalyzerTool : EditorWindow
 
         Graphics.Blit(saliencyTexture, saliencyPreview, saliencyMaterial);
 
-        Debug.Log($"[ColorAnalyzerTool] Saliency heatmap generated with exposure: {saliencyExposure}");
+        
     }
 
     // ───────── Utility

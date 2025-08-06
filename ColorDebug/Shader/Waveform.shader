@@ -16,6 +16,7 @@
             StructuredBuffer<uint4> _WaveformBuffer;
             // x: srcWidth, y: srcHeight, z: exposure
             float3 _Params;
+            float _ShowRed, _ShowGreen, _ShowBlue;
 
             struct v2f { float4 pos:SV_POSITION; float2 uv:TEXCOORD0; };
 
@@ -44,13 +45,13 @@
                 // ─── 핵심 수정: x * height + y ───
                 uint4 s = _WaveformBuffer[xi * h + yi];
 
-                float3 col =
-                      float3(1.4, 0.03, 0.02) * s.r +
-                      float3(0.02, 1.1, 0.05) * s.g +
-                      float3(0.00, 0.25, 1.5) * s.b;
+                float3 finalColor = float3(0,0,0);
+                if (_ShowRed > 0) finalColor += float3(1.4, 0.03, 0.02) * s.r;
+                if (_ShowGreen > 0) finalColor += float3(0.02, 1.1, 0.05) * s.g;
+                if (_ShowBlue > 0) finalColor += float3(0.00, 0.25, 1.5) * s.b;
 
-                col = Tonemap(col, _Params.z);
-                return float4(saturate(col), 1);
+                finalColor = Tonemap(finalColor, _Params.z);
+                return float4(saturate(finalColor), 1);
             }
             ENDHLSL
         }
