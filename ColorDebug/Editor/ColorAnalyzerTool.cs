@@ -6,7 +6,7 @@ public class ColorAnalyzerTool : EditorWindow
     private const string FOLDER_PATH = "Assets/Script/UnityScreenDebuger/ColorDebug/Shader";
 
     private enum CaptureTarget { GameView, SceneView }
-    private enum AnalysisMode { Histogram, Vectorscope, Waveform, Saliency } // ← Saliency 추가
+    private enum AnalysisMode { Histogram, Vectorscope, Waveform, Saliency }
 
     private CaptureTarget captureTarget = CaptureTarget.GameView;
     private AnalysisMode analysisMode = AnalysisMode.Histogram;
@@ -46,7 +46,7 @@ public class ColorAnalyzerTool : EditorWindow
     private RenderTexture saliencyTexture;
     private RenderTexture saliencyPreview;
     private Material saliencyMaterial;
-    private float saliencyExposure = 1.0f;
+    private float saliencyExposure = 2.0f; // 기본값 조정
 
     // misc
     private bool resourcesLoaded = false;
@@ -85,6 +85,7 @@ public class ColorAnalyzerTool : EditorWindow
         if (vectorscopeTexture != null) { vectorscopeTexture.Release(); DestroyImmediate(vectorscopeTexture); }
         if (waveformTexture != null) { waveformTexture.Release(); DestroyImmediate(waveformTexture); }
         if (saliencyTexture != null) { saliencyTexture.Release(); DestroyImmediate(saliencyTexture); }
+        if (saliencyPreview != null) { saliencyPreview.Release(); DestroyImmediate(saliencyPreview); } // 수정: 추가
 
         if (histogramMaterial != null) DestroyImmediate(histogramMaterial);
         if (vectorscopeMaterial != null) DestroyImmediate(vectorscopeMaterial);
@@ -110,6 +111,7 @@ public class ColorAnalyzerTool : EditorWindow
         LoadSaliencyResources();
 
         resourcesLoaded = true;
+        Debug.Log("[ColorAnalyzerTool] All resources loaded successfully");
     }
 
     void LoadHistogramResources()
@@ -158,9 +160,14 @@ public class ColorAnalyzerTool : EditorWindow
     {
         string path = $"{FOLDER_PATH}/SaliencyMap.shader";
         var shader = AssetDatabase.LoadAssetAtPath<Shader>(path);
-        if (shader == null) { Debug.LogWarning($"SaliencyMap shader missing: {path}"); return; }
+        if (shader == null)
+        {
+            Debug.LogError($"SaliencyMap shader missing: {path}");
+            return;
+        }
 
         saliencyMaterial = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
+        Debug.Log("[ColorAnalyzerTool] Saliency resources loaded successfully");
     }
 
     // ───────── Update & GUI
@@ -183,7 +190,7 @@ public class ColorAnalyzerTool : EditorWindow
         if (!resourcesLoaded)
         {
             EditorGUILayout.Space(10);
-            EditorGUILayout.HelpBox("Failed to load resources.", MessageType.Error);
+            EditorGUILayout.HelpBox("Failed to load resources. Check console for errors.", MessageType.Error);
             if (GUILayout.Button("Retry Loading")) LoadResources();
             return;
         }
@@ -283,7 +290,20 @@ public class ColorAnalyzerTool : EditorWindow
     void DrawSaliencySettings()
     {
         EditorGUILayout.LabelField("Saliency Settings", EditorStyles.miniBoldLabel);
-        saliencyExposure = EditorGUILayout.Slider("Exposure", saliencyExposure, 0.01f, 5f);
+        EditorGUILayout.Space(3);
+
+        saliencyExposure = EditorGUILayout.Slider("Intensity", saliencyExposure, 0.1f, 10f);
+
+        EditorGUILayout.Space(3);
+        EditorGUILayout.BeginHorizontal();
+        if (GUILayout.Button("Low", GUILayout.Width(50))) saliencyExposure = 0.5f;
+        if (GUILayout.Button("Normal", GUILayout.Width(60))) saliencyExposure = 2.0f;
+        if (GUILayout.Button("High", GUILayout.Width(50))) saliencyExposure = 5.0f;
+        if (GUILayout.Button("Max", GUILayout.Width(50))) saliencyExposure = 10.0f;
+        EditorGUILayout.EndHorizontal();
+
+        EditorGUILayout.Space(2);
+        EditorGUILayout.LabelField("Red = High Saliency, Blue = Low Saliency", EditorStyles.miniLabel);
     }
 
     // ----- Preview
@@ -304,7 +324,7 @@ public class ColorAnalyzerTool : EditorWindow
         EditorGUILayout.BeginHorizontal();
         EditorGUILayout.LabelField($"Size: {capturedTexture.width}×{capturedTexture.height}", EditorStyles.miniLabel);
         GUILayout.FlexibleSpace();
-        EditorGUI.BeginDisabledGroup(true);                 // 읽기 전용 표시
+        EditorGUI.BeginDisabledGroup(true);
         EditorGUILayout.Toggle("Auto", autoUpdate, GUILayout.Width(50));
         EditorGUI.EndDisabledGroup();
         EditorGUILayout.EndHorizontal();
@@ -351,7 +371,8 @@ public class ColorAnalyzerTool : EditorWindow
                 EditorGUILayout.LabelField($"Resolution: {capturedTexture.width}×{capturedTexture.height}", EditorStyles.miniLabel);
                 break;
             case AnalysisMode.Saliency:
-                EditorGUILayout.LabelField($"SaliencyMap: {capturedTexture.width}×{capturedTexture.height}", EditorStyles.miniLabel);
+                string status = (saliencyTexture != null && saliencyPreview != null) ? "Ready" : "Error";
+                EditorGUILayout.LabelField($"Status: {status} | Intensity: {saliencyExposure:F1}", EditorStyles.miniLabel);
                 break;
         }
         GUILayout.FlexibleSpace();
@@ -362,18 +383,49 @@ public class ColorAnalyzerTool : EditorWindow
     // ───────── Capture & analysis
     void Capture()
     {
-        if (!resourcesLoaded) return;
-        var src = CaptureFromCamera();
-        if (src == null) return;
-
-        switch (analysisMode)
+        if (!resourcesLoaded)
         {
-            case AnalysisMode.Histogram: AnalyzeHistogram(src); DrawHistogramWithShader(); break;
-            case AnalysisMode.Vectorscope: AnalyzeVectorscope(src); DrawVectorscopeWithShader(); break;
-            case AnalysisMode.Waveform: AnalyzeWaveform(src); DrawWaveformWithShader(); break;
-            case AnalysisMode.Saliency: AnalyzeSaliency(src); DrawSaliencyWithShader(); break;
+            Debug.LogWarning("[ColorAnalyzerTool] Resources not loaded, skipping capture");
+            return;
         }
-        RenderTexture.ReleaseTemporary(src);
+
+        var src = CaptureFromCamera();
+        if (src == null)
+        {
+            Debug.LogWarning("[ColorAnalyzerTool] Failed to capture from camera");
+            return;
+        }
+
+        try
+        {
+            switch (analysisMode)
+            {
+                case AnalysisMode.Histogram:
+                    AnalyzeHistogram(src);
+                    DrawHistogramWithShader();
+                    break;
+                case AnalysisMode.Vectorscope:
+                    AnalyzeVectorscope(src);
+                    DrawVectorscopeWithShader();
+                    break;
+                case AnalysisMode.Waveform:
+                    AnalyzeWaveform(src);
+                    DrawWaveformWithShader();
+                    break;
+                case AnalysisMode.Saliency:
+                    AnalyzeSaliency(src);
+                    DrawSaliencyWithShader();
+                    break;
+            }
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"[ColorAnalyzerTool] Analysis error: {e.Message}");
+        }
+        finally
+        {
+            RenderTexture.ReleaseTemporary(src);
+        }
     }
 
     RenderTexture CaptureFromCamera()
@@ -381,9 +433,20 @@ public class ColorAnalyzerTool : EditorWindow
         Camera cam = (captureTarget == CaptureTarget.GameView)
             ? (Camera.main ?? FindObjectOfType<Camera>())
             : (SceneView.lastActiveSceneView ?? GetWindow<SceneView>()).camera;
-        if (cam == null) return null;
+
+        if (cam == null)
+        {
+            Debug.LogError("[ColorAnalyzerTool] No camera found for capture");
+            return null;
+        }
 
         int w = cam.pixelWidth, h = cam.pixelHeight;
+        if (w <= 0 || h <= 0)
+        {
+            Debug.LogError($"[ColorAnalyzerTool] Invalid camera dimensions: {w}x{h}");
+            return null;
+        }
+
         var linearRT = RenderTexture.GetTemporary(w, h, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
 
         var desc = new RenderTextureDescriptor(w, h, RenderTextureFormat.ARGB32, 0)
@@ -391,16 +454,21 @@ public class ColorAnalyzerTool : EditorWindow
         var srgbRT = RenderTexture.GetTemporary(desc);
 
         var prev = cam.targetTexture;
-        cam.targetTexture = linearRT; cam.Render(); cam.targetTexture = prev;
+        cam.targetTexture = linearRT;
+        cam.Render();
+        cam.targetTexture = prev;
+
         Graphics.Blit(linearRT, srgbRT);
         RenderTexture.ReleaseTemporary(linearRT);
 
         if (capturedTexture != null) DestroyImmediate(capturedTexture);
         capturedTexture = new Texture2D(w, h, TextureFormat.ARGB32, false);
         RenderTexture.active = srgbRT;
-        capturedTexture.ReadPixels(new Rect(0, 0, w, h), 0, 0); capturedTexture.Apply();
+        capturedTexture.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+        capturedTexture.Apply();
         RenderTexture.active = null;
 
+        Debug.Log($"[ColorAnalyzerTool] Captured {w}x{h} image from {captureTarget}");
         return srgbRT;
     }
 
@@ -511,46 +579,90 @@ public class ColorAnalyzerTool : EditorWindow
     {
         int kernel = unifiedComputeShader.FindKernel("KSaliencyMap");
 
-        if (saliencyTexture == null || saliencyTexture.width != src.width || saliencyTexture.height != src.height)
+        if (kernel < 0)
         {
-            if (saliencyTexture != null) saliencyTexture.Release();
-            saliencyTexture = new RenderTexture(src.width, src.height, 0, RenderTextureFormat.RFloat)
-            { enableRandomWrite = true, hideFlags = HideFlags.HideAndDontSave };
-            saliencyTexture.Create();
+            Debug.LogError("[ColorAnalyzerTool] KSaliencyMap kernel not found in compute shader");
+            return;
         }
 
+        // Saliency texture 생성/재생성
+        if (saliencyTexture == null || saliencyTexture.width != src.width || saliencyTexture.height != src.height)
+        {
+            if (saliencyTexture != null)
+            {
+                saliencyTexture.Release();
+                DestroyImmediate(saliencyTexture);
+            }
+
+            saliencyTexture = new RenderTexture(src.width, src.height, 0, RenderTextureFormat.RFloat)
+            {
+                enableRandomWrite = true,
+                hideFlags = HideFlags.HideAndDontSave,
+                filterMode = FilterMode.Point
+            };
+
+            if (!saliencyTexture.Create())
+            {
+                Debug.LogError("[ColorAnalyzerTool] Failed to create saliency texture");
+                return;
+            }
+
+            Debug.Log($"[ColorAnalyzerTool] Created saliency texture: {src.width}x{src.height}");
+        }
+
+        // Compute shader 실행
         unifiedComputeShader.SetTexture(kernel, "_Source", src);
         unifiedComputeShader.SetTexture(kernel, "_SaliencyMap", saliencyTexture);
         unifiedComputeShader.SetVector("_Params", new Vector4(src.width, src.height, 0, 0));
 
-        unifiedComputeShader.Dispatch(kernel,
-            Mathf.CeilToInt(src.width / 16f),
-            Mathf.CeilToInt(src.height / 16f),
-            1);
+        int threadGroupsX = Mathf.CeilToInt(src.width / 16f);
+        int threadGroupsY = Mathf.CeilToInt(src.height / 16f);
+
+        unifiedComputeShader.Dispatch(kernel, threadGroupsX, threadGroupsY, 1);
+
+        Debug.Log($"[ColorAnalyzerTool] Saliency analysis dispatched: {threadGroupsX}x{threadGroupsY} thread groups");
     }
 
     void DrawSaliencyWithShader()
     {
-        if (saliencyMaterial == null || saliencyTexture == null) return;
+        if (saliencyMaterial == null || saliencyTexture == null)
+        {
+            Debug.LogError("[ColorAnalyzerTool] Saliency resources not available");
+            return;
+        }
 
-        // ──  미리보기용 RT 준비
+        // 미리보기용 RT 준비
         if (saliencyPreview == null ||
             saliencyPreview.width != saliencyTexture.width ||
             saliencyPreview.height != saliencyTexture.height)
         {
-            if (saliencyPreview != null) saliencyPreview.Release();
+            if (saliencyPreview != null)
+            {
+                saliencyPreview.Release();
+                DestroyImmediate(saliencyPreview);
+            }
+
             saliencyPreview = new RenderTexture(
                 saliencyTexture.width, saliencyTexture.height, 0,
                 RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
             saliencyPreview.hideFlags = HideFlags.HideAndDontSave;
-            saliencyPreview.filterMode = FilterMode.Point;
-            saliencyPreview.enableRandomWrite = false; // 그냥 Blit용
-            saliencyPreview.Create();
+            saliencyPreview.filterMode = FilterMode.Bilinear;
+            saliencyPreview.enableRandomWrite = false;
+
+            if (!saliencyPreview.Create())
+            {
+                Debug.LogError("[ColorAnalyzerTool] Failed to create saliency preview texture");
+                return;
+            }
         }
 
-        // ──  Heat-map 변환 (읽기: RFloat, 쓰기: ARGB32)
+        // Heat-map 변환
         saliencyMaterial.SetFloat("_Exposure", saliencyExposure);
+        saliencyMaterial.SetTexture("_MainTex", saliencyTexture);
+
         Graphics.Blit(saliencyTexture, saliencyPreview, saliencyMaterial);
+
+        Debug.Log($"[ColorAnalyzerTool] Saliency heatmap generated with exposure: {saliencyExposure}");
     }
 
     // ───────── Utility
