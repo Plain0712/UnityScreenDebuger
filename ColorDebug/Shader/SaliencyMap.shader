@@ -3,7 +3,6 @@ Shader "Hidden/SaliencyMap"
     Properties 
     {
         _MainTex ("Texture", 2D) = "white" {}
-        _Exposure ("Exposure", Float) = 1.0
         _Normalize ("Normalize", Float) = 0.0
         _MinMax ("MinMax", Vector) = (0,1,0,0)
     }
@@ -21,7 +20,6 @@ Shader "Hidden/SaliencyMap"
 
             sampler2D _MainTex;
             float4 _MainTex_ST;
-            float _Exposure;
             float _Normalize;
             float4 _MinMax;
 
@@ -45,36 +43,21 @@ Shader "Hidden/SaliencyMap"
                 return o;
             }
 
-            // 커스텀 히트맵 컬러 - 5단계 그라데이션
+            // 블루-그린-레드 히트맵 컬러 (3단계 그라데이션)
             float3 HeatmapColor(float t)
             {
                 t = saturate(t);
                 
-                // 5단계 히트맵: 검정 -> 파랑 -> 청록 -> 초록 -> 노랑 -> 빨강
-                if (t < 0.2)  // 검정 -> 파랑
+                // 3단계 히트맵: 파랑 -> 녹색 -> 빨강
+                if (t < 0.5)  // 파랑 -> 녹색
                 {
-                    float factor = t / 0.2;
-                    return lerp(float3(0.0, 0.0, 0.0), float3(0.0, 0.0, 1.0), factor);
+                    float factor = t / 0.5;
+                    return lerp(float3(0.0, 0.0, 1.0), float3(0.0, 1.0, 0.0), factor);
                 }
-                else if (t < 0.4)  // 파랑 -> 청록
+                else  // 녹색 -> 빨강
                 {
-                    float factor = (t - 0.2) / 0.2;
-                    return lerp(float3(0.0, 0.0, 1.0), float3(0.0, 1.0, 1.0), factor);
-                }
-                else if (t < 0.6)  // 청록 -> 초록
-                {
-                    float factor = (t - 0.4) / 0.2;
-                    return lerp(float3(0.0, 1.0, 1.0), float3(0.0, 1.0, 0.0), factor);
-                }
-                else if (t < 0.8) // 초록 -> 노랑
-                {
-                    float factor = (t - 0.6) / 0.2;
-                    return lerp(float3(0.0, 1.0, 0.0), float3(1.0, 1.0, 0.0), factor);
-                }
-                else // 노랑 -> 빨강
-                {
-                    float factor = (t - 0.8) / 0.2;
-                    return lerp(float3(1.0, 1.0, 0.0), float3(1.0, 0.0, 0.0), factor);
+                    float factor = (t - 0.5) / 0.5;
+                    return lerp(float3(0.0, 1.0, 0.0), float3(1.0, 0.0, 0.0), factor);
                 }
             }
 
@@ -112,6 +95,9 @@ Shader "Hidden/SaliencyMap"
                     if (maxVal - minVal > 0.0001)
                     {
                         saliency = (saliency - minVal) / (maxVal - minVal);
+                        
+                        // 오토 노멀라이즈 후 중간값 보존하는 대비 강화
+                        saliency = pow(saliency, 1.2); // 중간값도 보이는 적당한 대비
                     }
                     else
                     {
@@ -120,12 +106,9 @@ Shader "Hidden/SaliencyMap"
                 }
                 else
                 {
-                    // Exposure 적용
-                    saliency *= _Exposure;
-                }
-                
-                // 대비(contrast)를 높여서 더 극적인 효과를 줌
-                saliency = pow(saliency, 2.0); 
+                    // 기본 대비 강화만 적용
+                    saliency = pow(saliency, 1.8);
+                } 
                 
                 // 히트맵 색상 적용
                 float3 color = HeatmapColor(saliency);

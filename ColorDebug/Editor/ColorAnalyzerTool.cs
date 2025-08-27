@@ -7,7 +7,7 @@ public class ColorAnalyzerTool : EditorWindow
     private const string FOLDER_PATH = "Assets/Script/UnityScreenDebuger/ColorDebug/Shader";
 
     private enum CaptureTarget { GameView, SceneView }
-    private enum AnalysisMode { Histogram, Vectorscope, Waveform, Saliency }
+    private enum AnalysisMode { Histogram, Vectorscope, Waveform, Saliency, ColorPalette }
 
     private CaptureTarget captureTarget = CaptureTarget.GameView;
     private AnalysisMode analysisMode = AnalysisMode.Histogram;
@@ -55,6 +55,13 @@ public class ColorAnalyzerTool : EditorWindow
     private ComputeBuffer minMaxBuffer;
     private struct MinMax { public float min; public float max; };
 
+    // Color Palette
+    private Color[] dominantColors;
+    private int paletteSize = 8;
+    private bool showColorValues = false;
+    private ComputeBuffer colorPaletteBuffer;
+    private ComputeBuffer colorCountBuffer;
+
     // misc
     private bool resourcesLoaded = false;
 
@@ -88,6 +95,8 @@ public class ColorAnalyzerTool : EditorWindow
         vectorscopeBuffer?.Release();
         waveformBuffer?.Release();
         minMaxBuffer?.Release();
+        colorPaletteBuffer?.Release();
+        colorCountBuffer?.Release();
 
         if (histogramTexture != null) { histogramTexture.Release(); DestroyImmediate(histogramTexture); }
         if (vectorscopeTexture != null) { vectorscopeTexture.Release(); DestroyImmediate(vectorscopeTexture); }
@@ -252,6 +261,7 @@ public class ColorAnalyzerTool : EditorWindow
             case AnalysisMode.Vectorscope: DrawVectorscopeSettings(); break;
             case AnalysisMode.Waveform: DrawWaveformSettings(); break;
             case AnalysisMode.Saliency: DrawSaliencySettings(); break;
+            case AnalysisMode.ColorPalette: DrawColorPaletteSettings(); break;
         }
         EditorGUILayout.EndVertical();
     }
@@ -317,14 +327,22 @@ public class ColorAnalyzerTool : EditorWindow
         EditorGUILayout.LabelField("Saliency Settings", EditorStyles.miniBoldLabel);
         EditorGUILayout.Space(3);
 
-        //saliencyNormalize = EditorGUILayout.Toggle("Auto-Normalize", saliencyNormalize);
-
-        //EditorGUI.BeginDisabledGroup(saliencyNormalize);
-        //saliencyExposure = EditorGUILayout.Slider("Intensity", saliencyExposure, 0.1f, 10f);
-        EditorGUI.EndDisabledGroup();
+        saliencyNormalize = EditorGUILayout.Toggle("Auto-Normalize", saliencyNormalize);
 
         EditorGUILayout.Space(2);
         EditorGUILayout.LabelField("Red = High Saliency, Blue = Low Saliency", EditorStyles.miniLabel);
+    }
+
+    void DrawColorPaletteSettings()
+    {
+        EditorGUILayout.LabelField("Color Palette Settings", EditorStyles.miniBoldLabel);
+        EditorGUILayout.Space(3);
+
+        paletteSize = EditorGUILayout.IntSlider("Colors Count", paletteSize, 4, 8);
+        showColorValues = EditorGUILayout.Toggle("Show RGB Values", showColorValues);
+
+        EditorGUILayout.Space(2);
+        EditorGUILayout.LabelField("Extracts dominant colors from the image", EditorStyles.miniLabel);
     }
 
     // ----- Preview
@@ -357,6 +375,13 @@ public class ColorAnalyzerTool : EditorWindow
         EditorGUILayout.Space(15);
         EditorGUILayout.LabelField(analysisMode.ToString(), EditorStyles.boldLabel);
         EditorGUILayout.Space(3);
+
+        // ColorPalette는 텍스트로 표시하므로 별도 처리
+        if (analysisMode == AnalysisMode.ColorPalette)
+        {
+            DrawColorPalette();
+            return;
+        }
 
         float winW = EditorGUIUtility.currentViewWidth - 30;
         // Vectorscope는 높이를 절반으로 줄이고, 나머지는 원래 비율 유지
@@ -419,6 +444,10 @@ public class ColorAnalyzerTool : EditorWindow
                 string status = (saliencyTexture != null && saliencyPreview != null) ? "Ready" : "Error";
                 EditorGUILayout.LabelField($"Status: {status} | Intensity: {saliencyExposure:F1}", EditorStyles.miniLabel);
                 break;
+            case AnalysisMode.ColorPalette:
+                int colorCount = dominantColors != null ? dominantColors.Length : 0;
+                EditorGUILayout.LabelField($"Extracted Colors: {colorCount}/{paletteSize}", EditorStyles.miniLabel);
+                break;
         }
         GUILayout.FlexibleSpace();
         EditorGUILayout.LabelField($"Analysis: {analysisMode}", EditorStyles.miniLabel);
@@ -452,6 +481,10 @@ public class ColorAnalyzerTool : EditorWindow
                 case AnalysisMode.Saliency:
                     AnalyzeSaliency(src);
                     DrawSaliencyWithShader();
+                    break;
+                case AnalysisMode.ColorPalette:
+                    AnalyzeColorPaletteWithCompute(src);
+                    DrawColorPalette();
                     break;
             }
         }
@@ -733,6 +766,161 @@ public class ColorAnalyzerTool : EditorWindow
 
         
     }
+
+    // ────────── Color Palette Analysis
+    void AnalyzeColorPaletteWithCompute(RenderTexture sourceTexture)
+    {
+        if (unifiedComputeShader == null || sourceTexture == null) return;
+
+        // 버퍼 준비
+        if (colorPaletteBuffer == null || colorPaletteBuffer.count != paletteSize)
+        {
+            colorPaletteBuffer?.Release();
+            colorCountBuffer?.Release();
+            
+            colorPaletteBuffer = new ComputeBuffer(paletteSize, sizeof(float) * 4);
+            colorCountBuffer = new ComputeBuffer(paletteSize, sizeof(uint));
+        }
+
+        // 컴퓨트 셰이더 설정
+        int kClear = unifiedComputeShader.FindKernel("KColorPaletteClear");
+        int kExtract = unifiedComputeShader.FindKernel("KColorPaletteExtract");
+
+        unifiedComputeShader.SetTexture(kExtract, "_Source", sourceTexture);
+        unifiedComputeShader.SetBuffer(kClear, "_ColorPaletteBuffer", colorPaletteBuffer);
+        unifiedComputeShader.SetBuffer(kClear, "_ColorCountBuffer", colorCountBuffer);
+        unifiedComputeShader.SetBuffer(kExtract, "_ColorPaletteBuffer", colorPaletteBuffer);
+        unifiedComputeShader.SetBuffer(kExtract, "_ColorCountBuffer", colorCountBuffer);
+
+        unifiedComputeShader.SetVector("_Params", new Vector4(sourceTexture.width, sourceTexture.height, paletteSize, 0));
+
+        // 1. 버퍼 클리어
+        int clearThreads = Mathf.CeilToInt(paletteSize / 16f);
+        unifiedComputeShader.Dispatch(kClear, clearThreads, 1, 1);
+
+        // 2. 색상 추출
+        int threadGroupsX = Mathf.CeilToInt(sourceTexture.width / 16f);
+        int threadGroupsY = Mathf.CeilToInt(sourceTexture.height / 16f);
+        unifiedComputeShader.Dispatch(kExtract, threadGroupsX, threadGroupsY, 1);
+
+        // 3. 결과 읽기
+        Vector4[] paletteData = new Vector4[paletteSize];
+        uint[] countData = new uint[paletteSize];
+        
+        colorPaletteBuffer.GetData(paletteData);
+        colorCountBuffer.GetData(countData);
+
+        // 간단한 디버깅
+        int validColorCount = 0;
+        for (int i = 0; i < paletteSize; i++)
+        {
+            if (countData[i] > 0) validColorCount++;
+        }
+        Debug.Log($"[ColorPalette] Found {validColorCount} valid colors out of {paletteSize}");
+
+        // 카운트가 0이 아닌 색상들만 필터링하여 dominantColors에 저장
+        var colorList = new System.Collections.Generic.List<(Color color, uint count)>();
+        
+        for (int i = 0; i < paletteSize; i++)
+        {
+            if (countData[i] > 0)
+            {
+                Color color = new Color(paletteData[i].x, paletteData[i].y, paletteData[i].z, 1f);
+                colorList.Add((color, countData[i]));
+            }
+        }
+
+        // 만약 아무 색상도 없다면 기본 팔레트 생성
+        if (colorList.Count == 0)
+        {
+            Debug.LogWarning("[ColorPalette] No colors found, using default palette");
+            colorList.Add((Color.red, 1000));
+            colorList.Add((Color.green, 800));
+            colorList.Add((Color.blue, 600));
+            colorList.Add((Color.yellow, 400));
+        }
+
+        // 카운트 순으로 정렬 (많이 사용된 순)
+        colorList.Sort((a, b) => b.count.CompareTo(a.count));
+        
+        // Color 배열로 변환
+        dominantColors = colorList.Select(item => item.color).ToArray();
+    }
+
+    void DrawColorPalette()
+    {
+        if (dominantColors == null || dominantColors.Length == 0)
+        {
+            EditorGUILayout.LabelField("No colors extracted", EditorStyles.centeredGreyMiniLabel);
+            return;
+        }
+
+        EditorGUILayout.LabelField("Dominant Colors:", EditorStyles.boldLabel);
+        EditorGUILayout.Space(5);
+        
+        // 색상 팔레트를 격자로 표시
+        int columns = 4;
+        int rows = Mathf.CeilToInt((float)dominantColors.Length / columns);
+        
+        for (int row = 0; row < rows; row++)
+        {
+            EditorGUILayout.BeginHorizontal();
+            
+            for (int col = 0; col < columns; col++)
+            {
+                int index = row * columns + col;
+                if (index >= dominantColors.Length) break;
+
+                Color color = dominantColors[index];
+                
+                EditorGUILayout.BeginVertical(GUILayout.Width(showColorValues ? 120 : 70));
+                
+                // 색상 사각형 그리기
+                Rect colorRect = GUILayoutUtility.GetRect(60, 40);
+                EditorGUI.DrawRect(colorRect, color);
+                
+                // 테두리 그리기 (선택적)
+                EditorGUI.DrawRect(new Rect(colorRect.x, colorRect.y, colorRect.width, 1), Color.gray);
+                EditorGUI.DrawRect(new Rect(colorRect.x, colorRect.y + colorRect.height - 1, colorRect.width, 1), Color.gray);
+                EditorGUI.DrawRect(new Rect(colorRect.x, colorRect.y, 1, colorRect.height), Color.gray);
+                EditorGUI.DrawRect(new Rect(colorRect.x + colorRect.width - 1, colorRect.y, 1, colorRect.height), Color.gray);
+                
+                // 클릭 감지
+                if (colorRect.Contains(Event.current.mousePosition) && Event.current.type == EventType.MouseDown)
+                {
+                    string hexColor = ColorUtility.ToHtmlStringRGB(color);
+                    EditorGUIUtility.systemCopyBuffer = "#" + hexColor;
+                    Debug.Log($"Color #{hexColor} copied to clipboard");
+                    Event.current.Use();
+                }
+                
+                // RGB/Hex 값 표시 (옵션)
+                if (showColorValues)
+                {
+                    string hexColor = ColorUtility.ToHtmlStringRGB(color);
+                    EditorGUILayout.LabelField($"#{hexColor}", EditorStyles.miniLabel);
+                    EditorGUILayout.LabelField($"RGB({(int)(color.r * 255)}, {(int)(color.g * 255)}, {(int)(color.b * 255)})", EditorStyles.miniLabel);
+                }
+                else
+                {
+                    string hexColor = ColorUtility.ToHtmlStringRGB(color);
+                    EditorGUILayout.LabelField($"#{hexColor}", EditorStyles.miniLabel);
+                }
+                
+                EditorGUILayout.EndVertical();
+                
+                // 칼럼 사이 간격
+                if (col < columns - 1) GUILayout.Space(5);
+            }
+            
+            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.Space(5);
+        }
+        
+        EditorGUILayout.Space(3);
+        EditorGUILayout.LabelField("Click color to copy hex value", EditorStyles.miniLabel);
+    }
+
 
     // ───────── Utility
     static void DrawFullScreenQuad(Material mat)

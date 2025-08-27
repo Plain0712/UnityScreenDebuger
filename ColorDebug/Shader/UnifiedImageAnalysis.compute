@@ -9,6 +9,8 @@
 #pragma kernel KWaveformGather
 #pragma kernel KSaliencyMap
 #pragma kernel KSaliencyReduce
+#pragma kernel KColorPaletteExtract
+#pragma kernel KColorPaletteClear
 
 #define HISTOGRAM_BINS 256
 #define GROUP_SIZE_X 16
@@ -172,13 +174,22 @@ void KSaliencyMap(uint2 id : SV_DispatchThreadID)
 
     // 현재 픽셀의 색상
     float3 color = saturate(_Source[id].rgb);
-    float luminance = dot(color, float3(0.2126, 0.7152, 0.0722));
-
-    // ─── 1. Luminance Contrast (개선된 버전)
-    float avgLuminance = 0.0;
-    int sampleCount = 0;
     
-    // 3x3 커널로 주변 픽셀 샘플링
+    // BMS (Boolean Map Saliency) 구현
+    // 1. 밝기 임계값 체크
+    float luminance = dot(color, float3(0.2126, 0.7152, 0.0722));
+    bool brightPixel = luminance > 0.5;
+    
+    // 2. 채도 임계값 체크  
+    float maxRGB = max(color.r, max(color.g, color.b));
+    float minRGB = min(color.r, min(color.g, color.b));
+    float saturation = (maxRGB > 0.001) ? (maxRGB - minRGB) / maxRGB : 0.0;
+    bool saturatedPixel = saturation > 0.3;
+    
+    // 3. 지역적 명도 대비 체크 (3x3 윈도우)
+    float avgLuminance = 0.0;
+    int validSamples = 0;
+    
     for (int dy = -1; dy <= 1; dy++)
     {
         for (int dx = -1; dx <= 1; dx++)
@@ -187,67 +198,29 @@ void KSaliencyMap(uint2 id : SV_DispatchThreadID)
             if (samplePos.x >= 0 && samplePos.x < (int) _Params.x &&
                 samplePos.y >= 0 && samplePos.y < (int) _Params.y)
             {
-                if (dx != 0 || dy != 0) // 자기 자신 제외
+                if (dx != 0 || dy != 0) // 중심 픽셀 제외
                 {
                     float3 sampleColor = saturate(_Source[samplePos].rgb);
                     float sampleLum = dot(sampleColor, float3(0.2126, 0.7152, 0.0722));
                     avgLuminance += sampleLum;
-                    sampleCount++;
+                    validSamples++;
                 }
             }
         }
     }
     
-    if (sampleCount > 0)
-        avgLuminance /= sampleCount;
+    if (validSamples > 0)
+        avgLuminance /= validSamples;
     
-    float lumContrast = abs(luminance - avgLuminance);
-
-    // ─── 2. Saturation (개선된 계산)
-    float maxRGB = max(color.r, max(color.g, color.b));
-    float minRGB = min(color.r, min(color.g, color.b));
-    float saturation = (maxRGB > 0.001) ? (maxRGB - minRGB) / maxRGB : 0.0;
-
-    // ─── 3. Edge Detection (Sobel 연산자)
-    float sobelX = 0.0;
-    float sobelY = 0.0;
+    bool contrastPixel = abs(luminance - avgLuminance) > 0.15;
     
-    // Sobel 커널
-    int2 offsets[9] =
-    {
-        int2(-1, -1), int2(0, -1), int2(1, -1),
-        int2(-1, 0), int2(0, 0), int2(1, 0),
-        int2(-1, 1), int2(0, 1), int2(1, 1)
-    };
-    
-    float sobelXKernel[9] = { -1, 0, 1, -2, 0, 2, -1, 0, 1 };
-    float sobelYKernel[9] = { -1, -2, -1, 0, 0, 0, 1, 2, 1 };
-    
-    for (int i = 0; i < 9; i++)
-    {
-        int2 samplePos = int2(id) + offsets[i];
-        if (samplePos.x >= 0 && samplePos.x < (int) _Params.x &&
-            samplePos.y >= 0 && samplePos.y < (int) _Params.y)
-        {
-            float3 sampleColor = saturate(_Source[samplePos].rgb);
-            float sampleLum = dot(sampleColor, float3(0.2126, 0.7152, 0.0722));
-            
-            sobelX += sampleLum * sobelXKernel[i];
-            sobelY += sampleLum * sobelYKernel[i];
-        }
-    }
-    
-    float edge = sqrt(sobelX * sobelX + sobelY * sobelY);
-
-    // ─── 4. Color Uniqueness
-    float colorUniqueness = 0.0;
+    // 4. 색상 고유성 체크 (주변과 색상 차이)
     float3 avgColor = float3(0, 0, 0);
-    sampleCount = 0;
+    validSamples = 0;
     
-    // 5x5 영역에서 색상 유사도 계산
-    for (int dy = -2; dy <= 2; dy++)
+    for (int dy = -1; dy <= 1; dy++)
     {
-        for (int dx = -2; dx <= 2; dx++)
+        for (int dx = -1; dx <= 1; dx++)
         {
             int2 samplePos = int2(id) + int2(dx, dy);
             if (samplePos.x >= 0 && samplePos.x < (int) _Params.x &&
@@ -257,28 +230,100 @@ void KSaliencyMap(uint2 id : SV_DispatchThreadID)
                 {
                     float3 sampleColor = saturate(_Source[samplePos].rgb);
                     avgColor += sampleColor;
-                    sampleCount++;
+                    validSamples++;
                 }
             }
         }
     }
     
-    if (sampleCount > 0)
-    {
-        avgColor /= sampleCount;
-        colorUniqueness = length(color - avgColor);
-    }
-
-    // ─── 최종 가중합 및 정규화
-    float saliency = lumContrast * 2.0 + saturation * 1.5 + edge * 1.0 + colorUniqueness * 1.2;
+    if (validSamples > 0)
+        avgColor /= validSamples;
     
-    // 0-1 범위로 정규화
+    float colorDistance = length(color - avgColor);
+    bool uniqueColorPixel = colorDistance > 0.2;
+    
+    // BMS 최종 계산: Boolean 조건들의 가중합
+    float saliency = 0.0;
+    
+    // 각 조건에 가중치 부여 (증폭)
+    if (brightPixel) saliency += 0.25;
+    if (saturatedPixel) saliency += 0.35;
+    if (contrastPixel) saliency += 0.35;
+    if (uniqueColorPixel) saliency += 0.25;
+    
+    // 복합 조건 보너스 (증폭)
+    if (saturatedPixel && contrastPixel) saliency += 0.3; // 채도 + 명도대비
+    if (brightPixel && uniqueColorPixel) saliency += 0.2;  // 밝기 + 색상고유성
+    if (saturatedPixel && uniqueColorPixel) saliency += 0.2; // 채도 + 색상고유성
+    
+    // 추가 보너스 (레드 영역 확보)
+    if (saturatedPixel && contrastPixel && uniqueColorPixel) saliency += 0.3;
+    
+    // 최종 정규화 (더 넓은 범위 활용)
+    saliency = saliency / 1.9; // 최대 가능값으로 나누어 정규화
     saliency = saturate(saliency);
     
-    // 대비 강화를 위한 감마 보정
-    saliency = pow(saliency, 0.8);
+    // 극대화된 대비 강화 - 낮은 값은 거의 0으로, 높은 값은 최대로
+    saliency = saliency * saliency * saliency * (3.0 - 2.0 * saliency); // 더 가파른 S커브
+    
+    // 최종 대비 강화 - 상위 영역을 더욱 강조
+    saliency = pow(saliency, 0.3);
 
     _SaliencyMap[id] = saliency;
+}
+
+// ========================================
+// COLOR PALETTE ANALYSIS
+// ========================================
+// _Params: x = source width, y = source height, z = palette size, w = unused
+RWStructuredBuffer<float4> _ColorPaletteBuffer;
+RWStructuredBuffer<uint> _ColorCountBuffer;
+
+[numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
+void KColorPaletteClear(uint3 id : SV_DispatchThreadID)
+{
+    uint paletteSize = (uint)_Params.z;
+    if (id.x < paletteSize)
+    {
+        _ColorPaletteBuffer[id.x] = float4(0, 0, 0, 0);
+        _ColorCountBuffer[id.x] = 0;
+    }
+}
+
+[numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
+void KColorPaletteExtract(uint2 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Params.x || id.y >= (uint)_Params.y)
+        return;
+
+    float3 color = saturate(_Source[id].rgb);
+    uint paletteSize = (uint)_Params.z;
+    
+    // 색상을 16단계로 양자화하여 더 세밀한 색상 추출
+    uint r = (uint)(color.r * 15.0);
+    uint g = (uint)(color.g * 15.0);  
+    uint b = (uint)(color.b * 15.0);
+    
+    // RGB를 하나의 인덱스로 변환 (4096가지 가능한 색상)
+    uint colorHash = (r << 8) | (g << 4) | b; // 12bit 색상 해시
+    uint paletteIndex = colorHash % paletteSize;
+    
+    // 해당 슬롯이 비어있거나, 같은 색상이면 업데이트
+    uint oldCount;
+    InterlockedAdd(_ColorCountBuffer[paletteIndex], 1u, oldCount);
+    
+    if (oldCount == 0)
+    {
+        // 첫 번째 색상이면 색상 저장
+        _ColorPaletteBuffer[paletteIndex] = float4(color, 1.0);
+    }
+    else
+    {
+        // 기존 색상과 새 색상의 평균 계산 (점진적 평균)
+        float4 existingColor = _ColorPaletteBuffer[paletteIndex];
+        float weight = 1.0 / (oldCount + 1.0);
+        _ColorPaletteBuffer[paletteIndex] = lerp(existingColor, float4(color, 1.0), weight);
+    }
 }
 
 [numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
