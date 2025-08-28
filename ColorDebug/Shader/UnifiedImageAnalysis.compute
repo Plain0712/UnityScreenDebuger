@@ -9,8 +9,8 @@
 #pragma kernel KWaveformGather
 #pragma kernel KSaliencyMap
 #pragma kernel KSaliencyReduce
-#pragma kernel KColorPaletteExtract
 #pragma kernel KColorPaletteClear
+#pragma kernel KColorPaletteExtract
 
 #define HISTOGRAM_BINS 256
 #define GROUP_SIZE_X 16
@@ -218,15 +218,15 @@ void KSaliencyMap(uint2 id : SV_DispatchThreadID)
     float3 avgColor = float3(0, 0, 0);
     validSamples = 0;
     
-    for (int dy = -1; dy <= 1; dy++)
+    for (int dy2 = -1; dy2 <= 1; dy2++)
     {
-        for (int dx = -1; dx <= 1; dx++)
+        for (int dx2 = -1; dx2 <= 1; dx2++)
         {
-            int2 samplePos = int2(id) + int2(dx, dy);
+            int2 samplePos = int2(id) + int2(dx2, dy2);
             if (samplePos.x >= 0 && samplePos.x < (int) _Params.x &&
                 samplePos.y >= 0 && samplePos.y < (int) _Params.y)
             {
-                if (dx != 0 || dy != 0)
+                if (dx2 != 0 || dy2 != 0)
                 {
                     float3 sampleColor = saturate(_Source[samplePos].rgb);
                     avgColor += sampleColor;
@@ -279,7 +279,7 @@ void KSaliencyMap(uint2 id : SV_DispatchThreadID)
 RWStructuredBuffer<float4> _ColorPaletteBuffer;
 RWStructuredBuffer<uint> _ColorCountBuffer;
 
-[numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
+[numthreads(GROUP_SIZE_X, 1, 1)]
 void KColorPaletteClear(uint3 id : SV_DispatchThreadID)
 {
     uint paletteSize = (uint)_Params.z;
@@ -290,6 +290,7 @@ void KColorPaletteClear(uint3 id : SV_DispatchThreadID)
     }
 }
 
+// 지능형 3D 히스토그램 기반 색상 팔레트 추출
 [numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
 void KColorPaletteExtract(uint2 id : SV_DispatchThreadID)
 {
@@ -299,32 +300,61 @@ void KColorPaletteExtract(uint2 id : SV_DispatchThreadID)
     float3 color = saturate(_Source[id].rgb);
     uint paletteSize = (uint)_Params.z;
     
-    // 색상을 16단계로 양자화하여 더 세밀한 색상 추출
-    uint r = (uint)(color.r * 15.0);
-    uint g = (uint)(color.g * 15.0);  
-    uint b = (uint)(color.b * 15.0);
+    // === 1단계: 색상 중요도 계산 ===
+    float luminance = dot(color, float3(0.299, 0.587, 0.114));
+    float saturation = max(max(color.r, color.g), color.b) - min(min(color.r, color.g), color.b);
     
-    // RGB를 하나의 인덱스로 변환 (4096가지 가능한 색상)
-    uint colorHash = (r << 8) | (g << 4) | b; // 12bit 색상 해시
-    uint paletteIndex = colorHash % paletteSize;
+    // 시각적 중요도 스코어
+    float importanceScore = 1.0;
     
-    // 해당 슬롯이 비어있거나, 같은 색상이면 업데이트
-    uint oldCount;
-    InterlockedAdd(_ColorCountBuffer[paletteIndex], 1u, oldCount);
+    // 채도 보너스 (채도 높은 색상일수록 중요)
+    importanceScore += saturation * 4.0;
     
-    if (oldCount == 0)
+    // 적당한 밝기 보너스 (너무 어둡거나 밝지 않은 색상)
+    float brightnessBonus = 1.0 - abs(luminance - 0.5) * 2.0;
+    importanceScore += brightnessBonus * 2.0;
+    
+    // 에지 검출 (주변 픽셀과의 차이)
+    float edgeStrength = 0.0;
+    if (id.x > 0 && id.y > 0 && id.x < (uint)_Params.x - 1 && id.y < (uint)_Params.y - 1)
     {
-        // 첫 번째 색상이면 색상 저장
-        _ColorPaletteBuffer[paletteIndex] = float4(color, 1.0);
+        float3 neighbors[4];
+        neighbors[0] = _Source[id + uint2(1, 0)].rgb;  // 우
+        neighbors[1] = _Source[id + uint2(-1, 0)].rgb; // 좌
+        neighbors[2] = _Source[id + uint2(0, 1)].rgb;  // 아래
+        neighbors[3] = _Source[id + uint2(0, -1)].rgb; // 위
+        
+        for (int i = 0; i < 4; i++)
+        {
+            float3 diff = color - neighbors[i];
+            edgeStrength += dot(diff, diff);
+        }
+        edgeStrength /= 4.0;
     }
-    else
-    {
-        // 기존 색상과 새 색상의 평균 계산 (점진적 평균)
-        float4 existingColor = _ColorPaletteBuffer[paletteIndex];
-        float weight = 1.0 / (oldCount + 1.0);
-        _ColorPaletteBuffer[paletteIndex] = lerp(existingColor, float4(color, 1.0), weight);
-    }
+    
+    // 에지 보너스 (윤곽선 근처의 색상은 더 중요)
+    importanceScore += sqrt(edgeStrength) * 3.0;
+    
+    // === 2단계: 3D 히스토그램 빈 결정 ===
+    // RGB 공간을 6x6x6으로 분할 (216개 빈)
+    uint3 histBin = (uint3)(color * 5.99); // 0~5 범위
+    uint binIndex = histBin.r * 36 + histBin.g * 6 + histBin.b;
+    
+    // 팔레트 슬롯에 매핑
+    uint slotIndex = binIndex % paletteSize;
+    
+    // === 3단계: 가중 투표 및 색상 누적 ===
+    uint weight = max(1, (uint)(importanceScore * 100.0));
+    
+    // 투표 수 증가
+    InterlockedAdd(_ColorCountBuffer[slotIndex], weight);
+    
+    // 색상 누적 (가중 평균)
+    // 기존 접근법의 문제: InterlockedAdd 후 바로 읽으면 race condition
+    // 해결: 단순하게 덮어쓰기로 변경 (마지막 색상이 대표)
+    _ColorPaletteBuffer[slotIndex] = float4(color, importanceScore);
 }
+
 
 [numthreads(GROUP_SIZE_X, GROUP_SIZE_Y, 1)]
 void KSaliencyReduce(uint3 id : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex, uint3 groupID : SV_GroupID)

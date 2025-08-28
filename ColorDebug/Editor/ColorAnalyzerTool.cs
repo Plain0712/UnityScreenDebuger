@@ -785,6 +785,12 @@ public class ColorAnalyzerTool : EditorWindow
         // 컴퓨트 셰이더 설정
         int kClear = unifiedComputeShader.FindKernel("KColorPaletteClear");
         int kExtract = unifiedComputeShader.FindKernel("KColorPaletteExtract");
+        
+        if (kClear < 0 || kExtract < 0)
+        {
+            Debug.LogError($"[ColorPalette] Kernel not found: Clear={kClear}, Extract={kExtract}");
+            return;
+        }
 
         unifiedComputeShader.SetTexture(kExtract, "_Source", sourceTexture);
         unifiedComputeShader.SetBuffer(kClear, "_ColorPaletteBuffer", colorPaletteBuffer);
@@ -810,41 +816,109 @@ public class ColorAnalyzerTool : EditorWindow
         colorPaletteBuffer.GetData(paletteData);
         colorCountBuffer.GetData(countData);
 
-        // 간단한 디버깅
-        int validColorCount = 0;
-        for (int i = 0; i < paletteSize; i++)
-        {
-            if (countData[i] > 0) validColorCount++;
-        }
-        Debug.Log($"[ColorPalette] Found {validColorCount} valid colors out of {paletteSize}");
 
-        // 카운트가 0이 아닌 색상들만 필터링하여 dominantColors에 저장
-        var colorList = new System.Collections.Generic.List<(Color color, uint count)>();
+        // === 지능형 후처리 시스템 ===
+        
+        // 1단계: 유효한 색상 수집 및 중요도 계산
+        var candidateColors = new System.Collections.Generic.List<(Color color, uint votes, float importance)>();
         
         for (int i = 0; i < paletteSize; i++)
         {
-            if (countData[i] > 0)
+            if (countData[i] > 10) // 최소 투표 수 필터링
             {
                 Color color = new Color(paletteData[i].x, paletteData[i].y, paletteData[i].z, 1f);
-                colorList.Add((color, countData[i]));
+                float importance = paletteData[i].w; // 컴퓨트 셰이더에서 계산된 중요도
+                candidateColors.Add((color, countData[i], importance));
             }
         }
 
-        // 만약 아무 색상도 없다면 기본 팔레트 생성
-        if (colorList.Count == 0)
+        // 투표 수와 중요도를 결합한 스코어로 정렬
+        candidateColors.Sort((a, b) => (b.votes * b.importance).CompareTo(a.votes * a.importance));
+
+        // 2단계: 적응적 다양성 필터링 (정확한 개수 보장)
+        var diverseColors = new System.Collections.Generic.List<(Color color, uint votes, float importance)>();
+        float minColorDistance = 0.15f; // 초기 거리
+        
+        // 첫 번째 시도: 기본 거리로 필터링
+        foreach (var candidate in candidateColors)
         {
-            Debug.LogWarning("[ColorPalette] No colors found, using default palette");
-            colorList.Add((Color.red, 1000));
-            colorList.Add((Color.green, 800));
-            colorList.Add((Color.blue, 600));
-            colorList.Add((Color.yellow, 400));
+            if (diverseColors.Count >= paletteSize) break;
+            
+            bool tooSimilar = false;
+            foreach (var existing in diverseColors)
+            {
+                Vector3 diff = new Vector3(
+                    candidate.color.r - existing.color.r,
+                    candidate.color.g - existing.color.g,
+                    candidate.color.b - existing.color.b
+                );
+                
+                if (diff.magnitude < minColorDistance)
+                {
+                    tooSimilar = true;
+                    break;
+                }
+            }
+            
+            if (!tooSimilar)
+            {
+                diverseColors.Add(candidate);
+            }
+        }
+        
+        // 필요한 개수에 못 미치면 거리 기준을 점진적으로 완화
+        while (diverseColors.Count < paletteSize && minColorDistance > 0.05f)
+        {
+            minColorDistance -= 0.03f;
+            diverseColors.Clear();
+            
+            foreach (var candidate in candidateColors)
+            {
+                if (diverseColors.Count >= paletteSize) break;
+                
+                bool tooSimilar = false;
+                foreach (var existing in diverseColors)
+                {
+                    Vector3 diff = new Vector3(
+                        candidate.color.r - existing.color.r,
+                        candidate.color.g - existing.color.g,
+                        candidate.color.b - existing.color.b
+                    );
+                    
+                    if (diff.magnitude < minColorDistance)
+                    {
+                        tooSimilar = true;
+                        break;
+                    }
+                }
+                
+                if (!tooSimilar)
+                {
+                    diverseColors.Add(candidate);
+                }
+            }
+        }
+        
+        // 여전히 부족하면 상위 색상으로 채우기
+        if (diverseColors.Count < paletteSize)
+        {
+            var remainingSlots = paletteSize - diverseColors.Count;
+            var existing = diverseColors.Select(d => d.color).ToHashSet();
+            var additional = candidateColors
+                .Where(c => !existing.Contains(c.color))
+                .Take(remainingSlots);
+            
+            diverseColors.AddRange(additional);
         }
 
-        // 카운트 순으로 정렬 (많이 사용된 순)
-        colorList.Sort((a, b) => b.count.CompareTo(a.count));
-        
-        // Color 배열로 변환
-        dominantColors = colorList.Select(item => item.color).ToArray();
+        // 3단계: 정확히 paletteSize 개수로 최종 팔레트 생성
+        dominantColors = diverseColors.Take(paletteSize).Select(item => item.color).ToArray();
+
+        // 최종 폴백: 아무 색상도 없으면 화면의 평균 색상 사용
+        if (dominantColors.Length == 0)
+        {
+            dominantColors = ExtractFallbackColors(sourceTexture);
+        }
     }
 
     void DrawColorPalette()
@@ -858,67 +932,120 @@ public class ColorAnalyzerTool : EditorWindow
         EditorGUILayout.LabelField("Dominant Colors:", EditorStyles.boldLabel);
         EditorGUILayout.Space(5);
         
-        // 색상 팔레트를 격자로 표시
-        int columns = 4;
-        int rows = Mathf.CeilToInt((float)dominantColors.Length / columns);
+        // 화면 전체 너비 사용
+        float winW = EditorGUIUtility.currentViewWidth - 30;
+        float totalHeight = 150f; // 고정 높이
         
-        for (int row = 0; row < rows; row++)
+        var rect = GUILayoutUtility.GetRect(winW, totalHeight);
+        
+        if (Event.current.type == EventType.Repaint)
         {
-            EditorGUILayout.BeginHorizontal();
+            // 배경 그리기
+            EditorGUI.DrawRect(rect, new Color(0.2f, 0.2f, 0.2f));
             
-            for (int col = 0; col < columns; col++)
+            // 각 색상의 너비 계산 (비례적으로)
+            float colorWidth = rect.width / dominantColors.Length;
+            
+            for (int i = 0; i < dominantColors.Length; i++)
             {
-                int index = row * columns + col;
-                if (index >= dominantColors.Length) break;
-
-                Color color = dominantColors[index];
+                Color color = dominantColors[i];
                 
-                EditorGUILayout.BeginVertical(GUILayout.Width(showColorValues ? 120 : 70));
+                Rect colorRect = new Rect(
+                    rect.x + (i * colorWidth), 
+                    rect.y, 
+                    colorWidth, 
+                    rect.height
+                );
                 
                 // 색상 사각형 그리기
-                Rect colorRect = GUILayoutUtility.GetRect(60, 40);
                 EditorGUI.DrawRect(colorRect, color);
                 
-                // 테두리 그리기 (선택적)
-                EditorGUI.DrawRect(new Rect(colorRect.x, colorRect.y, colorRect.width, 1), Color.gray);
-                EditorGUI.DrawRect(new Rect(colorRect.x, colorRect.y + colorRect.height - 1, colorRect.width, 1), Color.gray);
-                EditorGUI.DrawRect(new Rect(colorRect.x, colorRect.y, 1, colorRect.height), Color.gray);
-                EditorGUI.DrawRect(new Rect(colorRect.x + colorRect.width - 1, colorRect.y, 1, colorRect.height), Color.gray);
-                
-                // 클릭 감지
-                if (colorRect.Contains(Event.current.mousePosition) && Event.current.type == EventType.MouseDown)
+                // 테두리 그리기 (색상 구분)
+                if (i > 0)
                 {
-                    string hexColor = ColorUtility.ToHtmlStringRGB(color);
-                    EditorGUIUtility.systemCopyBuffer = "#" + hexColor;
-                    Debug.Log($"Color #{hexColor} copied to clipboard");
-                    Event.current.Use();
+                    EditorGUI.DrawRect(new Rect(colorRect.x, colorRect.y, 1, colorRect.height), Color.black);
                 }
                 
-                // RGB/Hex 값 표시 (옵션)
+                // Hex 텍스트 표시 (중앙 정렬)
+                string hexColor = ColorUtility.ToHtmlStringRGB(color);
+                
+                // 텍스트 색상 결정 (명도에 따라)
+                float luminance = 0.299f * color.r + 0.587f * color.g + 0.114f * color.b;
+                Color textColor = luminance > 0.5f ? Color.black : Color.white;
+                
+                GUIStyle textStyle = new GUIStyle(EditorStyles.miniLabel);
+                textStyle.normal.textColor = textColor;
+                textStyle.alignment = TextAnchor.MiddleCenter;
+                textStyle.fontStyle = FontStyle.Bold;
+                
+                // 텍스트 위치 계산
+                Rect textRect = new Rect(colorRect.x, colorRect.y + colorRect.height * 0.4f, colorRect.width, 20);
+                GUI.Label(textRect, $"#{hexColor}", textStyle);
+                
+                // RGB 값 표시 (선택적)
                 if (showColorValues)
                 {
-                    string hexColor = ColorUtility.ToHtmlStringRGB(color);
-                    EditorGUILayout.LabelField($"#{hexColor}", EditorStyles.miniLabel);
-                    EditorGUILayout.LabelField($"RGB({(int)(color.r * 255)}, {(int)(color.g * 255)}, {(int)(color.b * 255)})", EditorStyles.miniLabel);
+                    Rect rgbRect = new Rect(colorRect.x, colorRect.y + colorRect.height * 0.6f, colorRect.width, 15);
+                    textStyle.fontSize = 9;
+                    GUI.Label(rgbRect, $"{(int)(color.r * 255)},{(int)(color.g * 255)},{(int)(color.b * 255)}", textStyle);
                 }
-                else
-                {
-                    string hexColor = ColorUtility.ToHtmlStringRGB(color);
-                    EditorGUILayout.LabelField($"#{hexColor}", EditorStyles.miniLabel);
-                }
-                
-                EditorGUILayout.EndVertical();
-                
-                // 칼럼 사이 간격
-                if (col < columns - 1) GUILayout.Space(5);
             }
+        }
+        
+        // 클릭 감지
+        if (rect.Contains(Event.current.mousePosition) && Event.current.type == EventType.MouseDown)
+        {
+            float colorWidth = rect.width / dominantColors.Length;
+            int clickedIndex = (int)((Event.current.mousePosition.x - rect.x) / colorWidth);
             
-            EditorGUILayout.EndHorizontal();
-            EditorGUILayout.Space(5);
+            if (clickedIndex >= 0 && clickedIndex < dominantColors.Length)
+            {
+                string hexColor = ColorUtility.ToHtmlStringRGB(dominantColors[clickedIndex]);
+                EditorGUIUtility.systemCopyBuffer = "#" + hexColor;
+                Debug.Log($"Color #{hexColor} copied to clipboard");
+                Event.current.Use();
+            }
         }
         
         EditorGUILayout.Space(3);
         EditorGUILayout.LabelField("Click color to copy hex value", EditorStyles.miniLabel);
+    }
+
+
+    // ───────── Fallback Color Extraction
+    Color[] ExtractFallbackColors(RenderTexture sourceTexture)
+    {
+        // 간단한 그리드 샘플링으로 대표 색상 추출
+        int gridSize = 3; // 3x3 그리드
+        Color[] fallbackColors = new Color[gridSize * gridSize];
+        
+        float stepX = (float)sourceTexture.width / gridSize;
+        float stepY = (float)sourceTexture.height / gridSize;
+        
+        RenderTexture.active = sourceTexture;
+        Texture2D tempTex = new Texture2D(sourceTexture.width, sourceTexture.height);
+        tempTex.ReadPixels(new Rect(0, 0, sourceTexture.width, sourceTexture.height), 0, 0);
+        tempTex.Apply();
+        RenderTexture.active = null;
+        
+        int colorIndex = 0;
+        for (int y = 0; y < gridSize; y++)
+        {
+            for (int x = 0; x < gridSize; x++)
+            {
+                int pixelX = Mathf.FloorToInt((x + 0.5f) * stepX);
+                int pixelY = Mathf.FloorToInt((y + 0.5f) * stepY);
+                
+                pixelX = Mathf.Clamp(pixelX, 0, sourceTexture.width - 1);
+                pixelY = Mathf.Clamp(pixelY, 0, sourceTexture.height - 1);
+                
+                fallbackColors[colorIndex] = tempTex.GetPixel(pixelX, pixelY);
+                colorIndex++;
+            }
+        }
+        
+        DestroyImmediate(tempTex);
+        return fallbackColors.Take(paletteSize).ToArray();
     }
 
 
