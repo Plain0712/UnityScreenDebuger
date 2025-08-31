@@ -57,7 +57,6 @@ public class ColorAnalyzerTool : EditorWindow
 
     // Color Palette
     private Color[] dominantColors;
-    private int paletteSize = 8;
     private bool showColorValues = false;
     private ComputeBuffer colorPaletteBuffer;
     private ComputeBuffer colorCountBuffer;
@@ -338,11 +337,10 @@ public class ColorAnalyzerTool : EditorWindow
         EditorGUILayout.LabelField("Color Palette Settings", EditorStyles.miniBoldLabel);
         EditorGUILayout.Space(3);
 
-        paletteSize = EditorGUILayout.IntSlider("Colors Count", paletteSize, 4, 8);
         showColorValues = EditorGUILayout.Toggle("Show RGB Values", showColorValues);
 
         EditorGUILayout.Space(2);
-        EditorGUILayout.LabelField("Extracts dominant colors from the image", EditorStyles.miniLabel);
+        EditorGUILayout.LabelField("Extracts 5 dominant colors using LAB K-Means clustering", EditorStyles.miniLabel);
     }
 
     // ----- Preview
@@ -446,7 +444,7 @@ public class ColorAnalyzerTool : EditorWindow
                 break;
             case AnalysisMode.ColorPalette:
                 int colorCount = dominantColors != null ? dominantColors.Length : 0;
-                EditorGUILayout.LabelField($"Extracted Colors: {colorCount}/{paletteSize}", EditorStyles.miniLabel);
+                EditorGUILayout.LabelField($"Extracted Colors: {colorCount}/5 (LAB K-Means)", EditorStyles.miniLabel);
                 break;
         }
         GUILayout.FlexibleSpace();
@@ -767,158 +765,125 @@ public class ColorAnalyzerTool : EditorWindow
         
     }
 
-    // ────────── Color Palette Analysis
-    void AnalyzeColorPaletteWithCompute(RenderTexture sourceTexture)
+    // ────────── Color Palette Analysis (GPU Histogram 기반)
+    void AnalyzeColorPaletteWithHistogram(RenderTexture sourceTexture)
     {
-        if (unifiedComputeShader == null || sourceTexture == null) return;
+        if (sourceTexture == null) return;
 
-        // 버퍼 준비
-        if (colorPaletteBuffer == null || colorPaletteBuffer.count != paletteSize)
+        // 1/30 다운샘플링된 텍스처 생성
+        int downsampledWidth = sourceTexture.width / 30;
+        int downsampledHeight = sourceTexture.height / 30;
+        
+        var downsampledTexture = RenderTexture.GetTemporary(downsampledWidth, downsampledHeight, 0, RenderTextureFormat.ARGB32);
+        Graphics.Blit(sourceTexture, downsampledTexture);
+
+        // 기존 히스토그램 방식 사용
+        AnalyzeHistogram(downsampledTexture);
+        
+        // 히스토그램 버퍼에서 데이터 읽기
+        uint[] histogramData = new uint[256 * 4];
+        histogramBuffer.GetData(histogramData);
+        
+        // RGB 히스토그램을 색상 히스토그램으로 변환
+        var colorHistogram = new System.Collections.Generic.Dictionary<Color, uint>();
+        
+        // 모든 가능한 4단계 양자화 색상에 대해 히스토그램 계산
+        for (int r = 0; r <= 3; r++)
         {
-            colorPaletteBuffer?.Release();
-            colorCountBuffer?.Release();
-            
-            colorPaletteBuffer = new ComputeBuffer(paletteSize, sizeof(float) * 4);
-            colorCountBuffer = new ComputeBuffer(paletteSize, sizeof(uint));
-        }
-
-        // 컴퓨트 셰이더 설정
-        int kClear = unifiedComputeShader.FindKernel("KColorPaletteClear");
-        int kExtract = unifiedComputeShader.FindKernel("KColorPaletteExtract");
-        
-        if (kClear < 0 || kExtract < 0)
-        {
-            Debug.LogError($"[ColorPalette] Kernel not found: Clear={kClear}, Extract={kExtract}");
-            return;
-        }
-
-        unifiedComputeShader.SetTexture(kExtract, "_Source", sourceTexture);
-        unifiedComputeShader.SetBuffer(kClear, "_ColorPaletteBuffer", colorPaletteBuffer);
-        unifiedComputeShader.SetBuffer(kClear, "_ColorCountBuffer", colorCountBuffer);
-        unifiedComputeShader.SetBuffer(kExtract, "_ColorPaletteBuffer", colorPaletteBuffer);
-        unifiedComputeShader.SetBuffer(kExtract, "_ColorCountBuffer", colorCountBuffer);
-
-        unifiedComputeShader.SetVector("_Params", new Vector4(sourceTexture.width, sourceTexture.height, paletteSize, 0));
-
-        // 1. 버퍼 클리어
-        int clearThreads = Mathf.CeilToInt(paletteSize / 16f);
-        unifiedComputeShader.Dispatch(kClear, clearThreads, 1, 1);
-
-        // 2. 색상 추출
-        int threadGroupsX = Mathf.CeilToInt(sourceTexture.width / 16f);
-        int threadGroupsY = Mathf.CeilToInt(sourceTexture.height / 16f);
-        unifiedComputeShader.Dispatch(kExtract, threadGroupsX, threadGroupsY, 1);
-
-        // 3. 결과 읽기
-        Vector4[] paletteData = new Vector4[paletteSize];
-        uint[] countData = new uint[paletteSize];
-        
-        colorPaletteBuffer.GetData(paletteData);
-        colorCountBuffer.GetData(countData);
-
-
-        // === 지능형 후처리 시스템 ===
-        
-        // 1단계: 유효한 색상 수집 및 중요도 계산
-        var candidateColors = new System.Collections.Generic.List<(Color color, uint votes, float importance)>();
-        
-        for (int i = 0; i < paletteSize; i++)
-        {
-            if (countData[i] > 10) // 최소 투표 수 필터링
+            for (int g = 0; g <= 3; g++)
             {
-                Color color = new Color(paletteData[i].x, paletteData[i].y, paletteData[i].z, 1f);
-                float importance = paletteData[i].w; // 컴퓨트 셰이더에서 계산된 중요도
-                candidateColors.Add((color, countData[i], importance));
-            }
-        }
-
-        // 투표 수와 중요도를 결합한 스코어로 정렬
-        candidateColors.Sort((a, b) => (b.votes * b.importance).CompareTo(a.votes * a.importance));
-
-        // 2단계: 적응적 다양성 필터링 (정확한 개수 보장)
-        var diverseColors = new System.Collections.Generic.List<(Color color, uint votes, float importance)>();
-        float minColorDistance = 0.15f; // 초기 거리
-        
-        // 첫 번째 시도: 기본 거리로 필터링
-        foreach (var candidate in candidateColors)
-        {
-            if (diverseColors.Count >= paletteSize) break;
-            
-            bool tooSimilar = false;
-            foreach (var existing in diverseColors)
-            {
-                Vector3 diff = new Vector3(
-                    candidate.color.r - existing.color.r,
-                    candidate.color.g - existing.color.g,
-                    candidate.color.b - existing.color.b
-                );
-                
-                if (diff.magnitude < minColorDistance)
+                for (int b = 0; b <= 3; b++)
                 {
-                    tooSimilar = true;
-                    break;
-                }
-            }
-            
-            if (!tooSimilar)
-            {
-                diverseColors.Add(candidate);
-            }
-        }
-        
-        // 필요한 개수에 못 미치면 거리 기준을 점진적으로 완화
-        while (diverseColors.Count < paletteSize && minColorDistance > 0.05f)
-        {
-            minColorDistance -= 0.03f;
-            diverseColors.Clear();
-            
-            foreach (var candidate in candidateColors)
-            {
-                if (diverseColors.Count >= paletteSize) break;
-                
-                bool tooSimilar = false;
-                foreach (var existing in diverseColors)
-                {
-                    Vector3 diff = new Vector3(
-                        candidate.color.r - existing.color.r,
-                        candidate.color.g - existing.color.g,
-                        candidate.color.b - existing.color.b
-                    );
+                    Color quantizedColor = new Color(r * 85f / 255f, g * 85f / 255f, b * 85f / 255f, 1f);
                     
-                    if (diff.magnitude < minColorDistance)
+                    // 해당 색상 범위의 히스토그램 값 합계
+                    uint totalCount = 0;
+                    
+                    int rStart = r * 64;  // 0, 64, 128, 192
+                    int gStart = g * 64;
+                    int bStart = b * 64;
+                    
+                    int rEnd = Mathf.Min(rStart + 64, 255);
+                    int gEnd = Mathf.Min(gStart + 64, 255);
+                    int bEnd = Mathf.Min(bStart + 64, 255);
+                    
+                    for (int ri = rStart; ri <= rEnd; ri++)
                     {
-                        tooSimilar = true;
-                        break;
+                        for (int gi = gStart; gi <= gEnd; gi++)
+                        {
+                            for (int bi = bStart; bi <= bEnd; bi++)
+                            {
+                                // 히스토그램에서 해당 값 찾기 (간소화된 버전)
+                                if (ri < 256 && gi < 256 && bi < 256)
+                                {
+                                    totalCount += histogramData[ri] + histogramData[256 + gi] + histogramData[512 + bi];
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (totalCount > 0)
+                    {
+                        colorHistogram[quantizedColor] = totalCount;
                     }
                 }
-                
-                if (!tooSimilar)
-                {
-                    diverseColors.Add(candidate);
-                }
             }
         }
         
-        // 여전히 부족하면 상위 색상으로 채우기
-        if (diverseColors.Count < paletteSize)
+        // 히스토그램에서 직접 상위 5개 추출
+        var extractedColors = ExtractHistogramPeaks(colorHistogram, 5);
+        
+        dominantColors = extractedColors.Take(5).ToArray();
+        
+        // 다운샘플링된 텍스처 해제
+        RenderTexture.ReleaseTemporary(downsampledTexture);
+    }
+
+    // ────────── Color Palette Analysis (LAB + K-Means 방식)
+    void AnalyzeColorPaletteWithCompute(RenderTexture sourceTexture)
+    {
+        if (sourceTexture == null) return;
+
+        // 1/15 다운샘플링된 텍스처 생성
+        int downsampledWidth = sourceTexture.width / 15;
+        int downsampledHeight = sourceTexture.height / 15;
+        
+        var downsampledTexture = RenderTexture.GetTemporary(downsampledWidth, downsampledHeight, 0, RenderTextureFormat.ARGB32);
+        Graphics.Blit(sourceTexture, downsampledTexture);
+
+        // CPU에서 직접 픽셀 읽기
+        Texture2D readableTexture = new Texture2D(downsampledWidth, downsampledHeight, TextureFormat.ARGB32, false);
+        RenderTexture.active = downsampledTexture;
+        readableTexture.ReadPixels(new Rect(0, 0, downsampledWidth, downsampledHeight), 0, 0);
+        readableTexture.Apply();
+        RenderTexture.active = null;
+
+        // LAB 색공간으로 변환 및 샘플링
+        Color32[] pixels = readableTexture.GetPixels32();
+        var labColors = new System.Collections.Generic.List<Vector3>();
+        var originalColors = new System.Collections.Generic.List<Color>();
+        
+        // 픽셀 샘플링 (너무 많으면 성능 문제로 일부만 샘플링)
+        int sampleStep = Mathf.Max(1, pixels.Length / 1000); // 최대 1000개 픽셀만 샘플링
+        
+        for (int i = 0; i < pixels.Length; i += sampleStep)
         {
-            var remainingSlots = paletteSize - diverseColors.Count;
-            var existing = diverseColors.Select(d => d.color).ToHashSet();
-            var additional = candidateColors
-                .Where(c => !existing.Contains(c.color))
-                .Take(remainingSlots);
+            Color rgbColor = new Color(pixels[i].r / 255f, pixels[i].g / 255f, pixels[i].b / 255f, 1f);
+            Vector3 labColor = RGBToLAB(rgbColor);
             
-            diverseColors.AddRange(additional);
+            labColors.Add(labColor);
+            originalColors.Add(rgbColor);
         }
 
-        // 3단계: 정확히 paletteSize 개수로 최종 팔레트 생성
-        dominantColors = diverseColors.Take(paletteSize).Select(item => item.color).ToArray();
-
-        // 최종 폴백: 아무 색상도 없으면 화면의 평균 색상 사용
-        if (dominantColors.Length == 0)
-        {
-            dominantColors = ExtractFallbackColors(sourceTexture);
-        }
+        // K-Means 클러스터링으로 5개 대표색 추출
+        var clusterCenters = PerformKMeansInLAB(labColors.ToArray(), originalColors.ToArray(), 5);
+        
+        // LAB에서 RGB로 다시 변환
+        dominantColors = clusterCenters.Select(center => LABToRGB(center)).ToArray();
+        
+        // 리소스 정리
+        DestroyImmediate(readableTexture);
+        RenderTexture.ReleaseTemporary(downsampledTexture);
     }
 
     void DrawColorPalette()
@@ -1012,6 +977,329 @@ public class ColorAnalyzerTool : EditorWindow
     }
 
 
+    // ───────── LAB Color Space Conversion
+    Vector3 RGBToLAB(Color rgb)
+    {
+        // RGB to XYZ
+        float r = rgb.r > 0.04045f ? Mathf.Pow((rgb.r + 0.055f) / 1.055f, 2.4f) : rgb.r / 12.92f;
+        float g = rgb.g > 0.04045f ? Mathf.Pow((rgb.g + 0.055f) / 1.055f, 2.4f) : rgb.g / 12.92f;
+        float b = rgb.b > 0.04045f ? Mathf.Pow((rgb.b + 0.055f) / 1.055f, 2.4f) : rgb.b / 12.92f;
+
+        float x = (r * 0.4124f + g * 0.3576f + b * 0.1805f) / 0.95047f;
+        float y = (r * 0.2126f + g * 0.7152f + b * 0.0722f) / 1.00000f;
+        float z = (r * 0.0193f + g * 0.1192f + b * 0.9505f) / 1.08883f;
+
+        // XYZ to LAB
+        x = x > 0.008856f ? Mathf.Pow(x, 1f/3f) : (7.787f * x + 16f/116f);
+        y = y > 0.008856f ? Mathf.Pow(y, 1f/3f) : (7.787f * y + 16f/116f);
+        z = z > 0.008856f ? Mathf.Pow(z, 1f/3f) : (7.787f * z + 16f/116f);
+
+        float L = 116f * y - 16f;
+        float A = 500f * (x - y);
+        float B = 200f * (y - z);
+
+        return new Vector3(L, A, B);
+    }
+
+    Color LABToRGB(Vector3 lab)
+    {
+        // LAB to XYZ
+        float y = (lab.x + 16f) / 116f;
+        float x = lab.y / 500f + y;
+        float z = y - lab.z / 200f;
+
+        x = x > 0.206893f ? x * x * x : (x - 16f/116f) / 7.787f;
+        y = y > 0.206893f ? y * y * y : (y - 16f/116f) / 7.787f;
+        z = z > 0.206893f ? z * z * z : (z - 16f/116f) / 7.787f;
+
+        x *= 0.95047f;
+        y *= 1.00000f;
+        z *= 1.08883f;
+
+        // XYZ to RGB
+        float r = x *  3.2406f + y * -1.5372f + z * -0.4986f;
+        float g = x * -0.9689f + y *  1.8758f + z *  0.0415f;
+        float b = x *  0.0557f + y * -0.2040f + z *  1.0570f;
+
+        r = r > 0.0031308f ? 1.055f * Mathf.Pow(r, 1f/2.4f) - 0.055f : 12.92f * r;
+        g = g > 0.0031308f ? 1.055f * Mathf.Pow(g, 1f/2.4f) - 0.055f : 12.92f * g;
+        b = b > 0.0031308f ? 1.055f * Mathf.Pow(b, 1f/2.4f) - 0.055f : 12.92f * b;
+
+        return new Color(Mathf.Clamp01(r), Mathf.Clamp01(g), Mathf.Clamp01(b), 1f);
+    }
+
+    // ───────── K-Means Clustering in LAB Space
+    Vector3[] PerformKMeansInLAB(Vector3[] labColors, Color[] originalColors, int k)
+    {
+        if (labColors.Length == 0) return new Vector3[0];
+        if (labColors.Length <= k) return labColors.Take(k).ToArray();
+
+        var random = new System.Random(42); // 시드 고정으로 결정적 결과
+        var centroids = new Vector3[k];
+        
+        // K-means++ 초기화 (더 좋은 초기 중심점)
+        centroids[0] = labColors[random.Next(labColors.Length)];
+        
+        for (int i = 1; i < k; i++)
+        {
+            var distances = new float[labColors.Length];
+            float totalDistance = 0;
+            
+            for (int j = 0; j < labColors.Length; j++)
+            {
+                float minDistanceToCentroid = float.MaxValue;
+                
+                for (int c = 0; c < i; c++)
+                {
+                    float distance = LABDistance(labColors[j], centroids[c]);
+                    minDistanceToCentroid = Mathf.Min(minDistanceToCentroid, distance);
+                }
+                
+                distances[j] = minDistanceToCentroid * minDistanceToCentroid;
+                totalDistance += distances[j];
+            }
+            
+            float targetDistance = (float)random.NextDouble() * totalDistance;
+            float currentDistance = 0;
+            
+            for (int j = 0; j < labColors.Length; j++)
+            {
+                currentDistance += distances[j];
+                if (currentDistance >= targetDistance)
+                {
+                    centroids[i] = labColors[j];
+                    break;
+                }
+            }
+        }
+        
+        // K-means 반복
+        for (int iter = 0; iter < 20; iter++)
+        {
+            var clusters = new System.Collections.Generic.List<Vector3>[k];
+            for (int i = 0; i < k; i++) clusters[i] = new System.Collections.Generic.List<Vector3>();
+            
+            // 각 점을 가장 가까운 중심점에 할당
+            foreach (var color in labColors)
+            {
+                float minDistance = float.MaxValue;
+                int bestCluster = 0;
+                
+                for (int i = 0; i < k; i++)
+                {
+                    float distance = LABDistance(color, centroids[i]);
+                    if (distance < minDistance)
+                    {
+                        minDistance = distance;
+                        bestCluster = i;
+                    }
+                }
+                
+                clusters[bestCluster].Add(color);
+            }
+            
+            // 새로운 중심점 계산
+            bool converged = true;
+            for (int i = 0; i < k; i++)
+            {
+                if (clusters[i].Count == 0) continue;
+                
+                Vector3 newCentroid = Vector3.zero;
+                foreach (var point in clusters[i])
+                {
+                    newCentroid += point;
+                }
+                newCentroid /= clusters[i].Count;
+                
+                if (LABDistance(centroids[i], newCentroid) > 1.0f)
+                {
+                    converged = false;
+                }
+                
+                centroids[i] = newCentroid;
+            }
+            
+            if (converged) break;
+        }
+        
+        return centroids;
+    }
+    
+    float LABDistance(Vector3 lab1, Vector3 lab2)
+    {
+        return Vector3.Distance(lab1, lab2);
+    }
+
+    // ───────── Color Quantization (백업용)
+    Color QuantizeColor(Color color)
+    {
+        // RGB를 4단계로 양자화 (0, 85, 170, 255) - 최대 안정성을 위한 극강 양자화
+        int r = Mathf.RoundToInt(color.r * 3) * 85;
+        int g = Mathf.RoundToInt(color.g * 3) * 85;
+        int b = Mathf.RoundToInt(color.b * 3) * 85;
+        
+        return new Color(r / 255f, g / 255f, b / 255f, 1f);
+    }
+    
+    // ───────── K-means Clustering
+    System.Collections.Generic.List<Color> PerformKMeansClustering(System.Collections.Generic.Dictionary<Color, uint> histogram, int k)
+    {
+        if (histogram.Count == 0) return new System.Collections.Generic.List<Color>();
+        
+        var colors = histogram.Keys.ToArray();
+        var weights = histogram.Values.ToArray();
+        
+        if (colors.Length <= k)
+        {
+            return colors.OrderByDescending(c => histogram[c]).ToList();
+        }
+        
+        // K-means 초기 중심점 설정 (가중치 기반 선택)
+        var centroids = new Color[k];
+        uint totalWeight = 0;
+        for (int i = 0; i < weights.Length; i++) totalWeight += weights[i];
+        var selectedIndices = new System.Collections.Generic.HashSet<int>();
+        
+        for (int i = 0; i < k; i++)
+        {
+            float targetWeight = (float)(i + 1) * totalWeight / (k + 1);
+            float currentWeight = 0;
+            
+            for (int j = 0; j < colors.Length; j++)
+            {
+                if (selectedIndices.Contains(j)) continue;
+                
+                currentWeight += weights[j];
+                if (currentWeight >= targetWeight)
+                {
+                    centroids[i] = colors[j];
+                    selectedIndices.Add(j);
+                    break;
+                }
+            }
+        }
+        
+        // K-means 반복 (최대 10회)
+        for (int iter = 0; iter < 10; iter++)
+        {
+            var clusters = new System.Collections.Generic.List<Color>[k];
+            var clusterWeights = new System.Collections.Generic.List<uint>[k];
+            
+            for (int i = 0; i < k; i++)
+            {
+                clusters[i] = new System.Collections.Generic.List<Color>();
+                clusterWeights[i] = new System.Collections.Generic.List<uint>();
+            }
+            
+            // 각 색상을 가장 가까운 중심점에 할당
+            foreach (var kvp in histogram)
+            {
+                float minDistance = float.MaxValue;
+                int bestCluster = 0;
+                
+                for (int i = 0; i < k; i++)
+                {
+                    float distance = ColorDistance(kvp.Key, centroids[i]);
+                    if (distance < minDistance)
+                    {
+                        minDistance = distance;
+                        bestCluster = i;
+                    }
+                }
+                
+                clusters[bestCluster].Add(kvp.Key);
+                clusterWeights[bestCluster].Add(kvp.Value);
+            }
+            
+            // 새로운 중심점 계산 (가중 평균)
+            bool converged = true;
+            for (int i = 0; i < k; i++)
+            {
+                if (clusters[i].Count == 0) continue;
+                
+                float totalR = 0, totalG = 0, totalB = 0;
+                uint totalWeight2 = 0;
+                
+                for (int j = 0; j < clusters[i].Count; j++)
+                {
+                    var color = clusters[i][j];
+                    var weight = clusterWeights[i][j];
+                    
+                    totalR += color.r * weight;
+                    totalG += color.g * weight;
+                    totalB += color.b * weight;
+                    totalWeight2 += weight;
+                }
+                
+                var newCentroid = new Color(totalR / totalWeight2, totalG / totalWeight2, totalB / totalWeight2, 1f);
+                
+                if (ColorDistance(centroids[i], newCentroid) > 0.01f)
+                {
+                    converged = false;
+                }
+                
+                centroids[i] = newCentroid;
+            }
+            
+            if (converged) break;
+        }
+        
+        // 중심점들을 가중치 기준으로 정렬
+        var result = new System.Collections.Generic.List<(Color color, uint weight)>();
+        
+        for (int i = 0; i < k; i++)
+        {
+            uint clusterWeight = 0;
+            foreach (var kvp in histogram)
+            {
+                if (GetClosestCentroid(kvp.Key, centroids) == i)
+                {
+                    clusterWeight += kvp.Value;
+                }
+            }
+            result.Add((centroids[i], clusterWeight));
+        }
+        
+        return result.OrderByDescending(x => x.weight).Select(x => x.color).ToList();
+    }
+    
+    float ColorDistance(Color a, Color b)
+    {
+        float dr = a.r - b.r;
+        float dg = a.g - b.g;
+        float db = a.b - b.b;
+        return dr * dr + dg * dg + db * db;
+    }
+    
+    int GetClosestCentroid(Color color, Color[] centroids)
+    {
+        float minDistance = float.MaxValue;
+        int closest = 0;
+        
+        for (int i = 0; i < centroids.Length; i++)
+        {
+            float distance = ColorDistance(color, centroids[i]);
+            if (distance < minDistance)
+            {
+                minDistance = distance;
+                closest = i;
+            }
+        }
+        
+        return closest;
+    }
+    
+    // ───────── Histogram Peak Detection
+    System.Collections.Generic.List<Color> ExtractHistogramPeaks(System.Collections.Generic.Dictionary<Color, uint> histogram, int count)
+    {
+        return histogram
+            .OrderByDescending(kvp => kvp.Value) // 1차: 픽셀 수 기준
+            .ThenBy(kvp => kvp.Key.r + kvp.Key.g + kvp.Key.b) // 2차: RGB 합계 기준 (일관된 순서)
+            .Take(count)
+            .Select(kvp => kvp.Key)
+            .ToList();
+    }
+
     // ───────── Fallback Color Extraction
     Color[] ExtractFallbackColors(RenderTexture sourceTexture)
     {
@@ -1045,7 +1333,7 @@ public class ColorAnalyzerTool : EditorWindow
         }
         
         DestroyImmediate(tempTex);
-        return fallbackColors.Take(paletteSize).ToArray();
+        return fallbackColors.Take(5).ToArray();
     }
 
 
