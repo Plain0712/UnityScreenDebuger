@@ -13,4 +13,4 @@
 
 
 [Saliency/ColorPalette]
-![Uploading Honeycam 2025-10-22 09-22-53.gif…]()
+![Honeycam 2025-10-22 09-22-53](https://github.com/user-attachments/assets/d39f956d-4172-40dd-8d9b-544e9fef8bc5)
