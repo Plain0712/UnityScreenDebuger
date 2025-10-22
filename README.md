@@ -7,4 +7,10 @@
 - Saliency (exp)
 - ColorPalette (exp)
 
+
+[Histogram/VectorScope/Waveform]
 ![Honeycam 2025-10-22 09-21-08](https://github.com/user-attachments/assets/5469edd7-829d-433a-8d79-7bfc097e0d02)
+
+
+[Saliency/ColorPalette]
+![Uploading Honeycam 2025-10-22 09-22-53.gif…]()
