@@ -1,5 +1,7 @@
 유니티 PP에 들어있던 컴퓨트 쉐이더 활용한 화면 분석도구
 
+
+
 1. Game View/Scene View 기반
 - Histogram
 - VectorScope
@@ -8,9 +10,32 @@
 - ColorPalette (exp)
 
 
+
+
 [Histogram/VectorScope/Waveform]
+
 ![Honeycam 2025-10-22 09-21-08](https://github.com/user-attachments/assets/5469edd7-829d-433a-8d79-7bfc097e0d02)
 
 
+
+
+
+
+
 [Saliency/ColorPalette]
+
 ![Honeycam 2025-10-22 09-22-53](https://github.com/user-attachments/assets/d39f956d-4172-40dd-8d9b-544e9fef8bc5)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
