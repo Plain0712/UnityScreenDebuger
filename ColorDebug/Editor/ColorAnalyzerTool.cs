@@ -66,6 +66,7 @@ public class ColorAnalyzerTool : EditorWindow
     private const int HISTOGRAM_TEXTURE_HEIGHT = 200;
     private const int VECTORSCOPE_TEXTURE_SIZE = 256;
     private const int WAVEFORM_TEXTURE_HEIGHT = 200;
+    private const float VECTORSCOPE_VERTICAL_MARGIN = 24f;
 
     // UI 색상 (디자인 가이드)
     private static readonly Color windowBackground = new Color(0.22f, 0.22f, 0.22f, 1f);
@@ -733,7 +734,8 @@ public class ColorAnalyzerTool : EditorWindow
             {
                 if (analysisMode == AnalysisMode.Vectorscope)
                 {
-                    float scopeSize = Mathf.Min(rect.width, rect.height);
+                    float maxScopeHeight = Mathf.Max(rect.height - VECTORSCOPE_VERTICAL_MARGIN * 4f, 0f);
+                    float scopeSize = Mathf.Min(rect.width, maxScopeHeight);
                     Rect scopeRect = new Rect(rect.x + (rect.width - scopeSize) * 0.5f,
                                               rect.y + (rect.height - scopeSize) * 0.5f,
                                               scopeSize,
